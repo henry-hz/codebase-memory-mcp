@@ -1014,6 +1014,137 @@ const char *cbm_nix_qn_name(CBMArena *a, TSNode func_node, const char *source, c
     return scope ? cbm_arena_sprintf(a, "%s.%s", scope, name) : name;
 }
 
+// --- Elixir (shared by extract_defs.c and extract_unified.c) ---
+
+const char *cbm_elixir_scoped_qn(CBMArena *a, const char *project, const char *rel_path,
+                                 const char *parent_qn, const char *name) {
+    if (!name || !name[0]) {
+        return NULL;
+    }
+    if (parent_qn && parent_qn[0]) {
+        return cbm_arena_sprintf(a, "%s.%s", parent_qn, name);
+    }
+    return cbm_fqn_compute(a, project, rel_path, name);
+}
+
+TSNode cbm_elixir_def_head(TSNode arg, const char *source) {
+    if (ts_node_is_null(arg) || strcmp(ts_node_type(arg), "binary_operator") != 0) {
+        return arg;
+    }
+    /* Only `when` (the guard operator) wraps a def head. Any other binary
+     * operator here is an operator DEFINITION (`def a <> b`), whose head is the
+     * whole expression — unwrapping it would name the def after its left
+     * operand. */
+    TSNode op = ts_node_child_by_field_name(arg, TS_FIELD("operator"));
+    if (ts_node_is_null(op)) {
+        return arg;
+    }
+    uint32_t s = ts_node_start_byte(op);
+    uint32_t e = ts_node_end_byte(op);
+    if (e - s != 4 || !source || strncmp(source + s, "when", 4) != 0) {
+        return arg;
+    }
+    TSNode left = ts_node_child_by_field_name(arg, TS_FIELD("left"));
+    return ts_node_is_null(left) ? arg : left;
+}
+
+bool cbm_elixir_is_module_macro(const char *macro) {
+    if (!macro) {
+        return false;
+    }
+    return strcmp(macro, "defmodule") == 0 || strcmp(macro, "defprotocol") == 0 ||
+           strcmp(macro, "defimpl") == 0;
+}
+
+bool cbm_elixir_is_func_macro(const char *macro) {
+    if (!macro) {
+        return false;
+    }
+    static const char *macros[] = {"def",      "defp",      "defmacro",    "defmacrop",
+                                   "defguard", "defguardp", "defdelegate", NULL};
+    for (int i = 0; macros[i]; i++) {
+        if (strcmp(macro, macros[i]) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+TSNode cbm_elixir_call_args(TSNode node) {
+    TSNode args = ts_node_child_by_field_name(node, TS_FIELD("arguments"));
+    if (ts_node_is_null(args) && ts_node_child_count(node) > 1) {
+        args = ts_node_child(node, 1);
+    }
+    return args;
+}
+
+TSNode cbm_elixir_keyword_value(TSNode args, const char *source, const char *key) {
+    TSNode null_node = {0};
+    if (ts_node_is_null(args) || !source || !key) {
+        return null_node;
+    }
+    size_t klen = strlen(key);
+    for (uint32_t i = 0; i < ts_node_named_child_count(args); i++) {
+        TSNode kws = ts_node_named_child(args, i);
+        if (strcmp(ts_node_type(kws), "keywords") != 0) {
+            continue;
+        }
+        for (uint32_t j = 0; j < ts_node_named_child_count(kws); j++) {
+            TSNode pair = ts_node_named_child(kws, j);
+            if (strcmp(ts_node_type(pair), "pair") != 0) {
+                continue;
+            }
+            TSNode k = ts_node_child_by_field_name(pair, TS_FIELD("key"));
+            if (ts_node_is_null(k)) {
+                continue;
+            }
+            /* A `keyword` key node's text carries the colon ("for: "). */
+            uint32_t s = ts_node_start_byte(k);
+            uint32_t e = ts_node_end_byte(k);
+            if ((size_t)(e - s) <= klen || strncmp(source + s, key, klen) != 0 ||
+                source[s + klen] != ':') {
+                continue;
+            }
+            return ts_node_child_by_field_name(pair, TS_FIELD("value"));
+        }
+    }
+    return null_node;
+}
+
+const char *cbm_elixir_module_name(CBMArena *a, TSNode call_node, const char *source) {
+    if (ts_node_child_count(call_node) == 0) {
+        return NULL;
+    }
+    char *macro = cbm_node_text(a, ts_node_child(call_node, 0), source);
+    if (!cbm_elixir_is_module_macro(macro)) {
+        return NULL;
+    }
+    TSNode args = cbm_elixir_call_args(call_node);
+    /* Named child, so a parenthesised `defmodule(A)` skips the "(" token. */
+    if (ts_node_is_null(args) || ts_node_named_child_count(args) == 0) {
+        return NULL;
+    }
+    TSNode name_node = ts_node_named_child(args, 0);
+    if (ts_node_is_null(name_node)) {
+        return NULL;
+    }
+    char *name = cbm_node_text(a, name_node, source);
+    if (!name || !name[0]) {
+        return NULL;
+    }
+    /* `defimpl Enumerable, for: List` compiles to the module Enumerable.List. */
+    if (strcmp(macro, "defimpl") == 0) {
+        TSNode target = cbm_elixir_keyword_value(args, source, "for");
+        if (!ts_node_is_null(target)) {
+            char *tname = cbm_node_text(a, target, source);
+            if (tname && tname[0]) {
+                return cbm_arena_sprintf(a, "%s.%s", name, tname);
+            }
+        }
+    }
+    return name;
+}
+
 static const char *func_node_name(CBMArena *a, TSNode func_node, const char *source,
                                   CBMLanguage lang) {
     // Wolfram: set_delayed_top/set_top/set_delayed/set — LHS is apply(user_symbol("f"), ...)

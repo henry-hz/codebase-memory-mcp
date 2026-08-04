@@ -945,6 +945,44 @@ TEST(r_function) {
  * ═══════════════════════════════════════════════════════════════════ */
 
 /* --- Elixir --- */
+
+/* The enclosing-function QN recorded for the first call to `callee`, or NULL.
+ * Elixir's def side (extract_defs.c) and call-scope side (extract_unified.c)
+ * compute this independently; if they disagree the CALLS edge sources to a QN
+ * no node carries and is dropped at write, so several tests below assert the
+ * two agree exactly. */
+static const char *call_enclosing_qn(CBMFileResult *r, const char *callee) {
+    for (int i = 0; i < r->calls.count; i++) {
+        if (strcmp(r->calls.items[i].callee_name, callee) == 0) {
+            return r->calls.items[i].enclosing_func_qn;
+        }
+    }
+    return NULL;
+}
+
+/* True when the definition named `name` declares `base` in base_classes. */
+static int has_base_class(CBMFileResult *r, const char *name, const char *base) {
+    for (int i = 0; i < r->defs.count; i++) {
+        if (strcmp(r->defs.items[i].name, name) != 0 || !r->defs.items[i].base_classes) {
+            continue;
+        }
+        for (int b = 0; r->defs.items[i].base_classes[b]; b++) {
+            if (strcmp(r->defs.items[i].base_classes[b], base) == 0)
+                return 1;
+        }
+    }
+    return 0;
+}
+
+static int count_defs_with_name(CBMFileResult *r, const char *name) {
+    int count = 0;
+    for (int i = 0; i < r->defs.count; i++) {
+        if (strcmp(r->defs.items[i].name, name) == 0)
+            count++;
+    }
+    return count;
+}
+
 TEST(elixir_function) {
     CBMFileResult *r = extract("defmodule Greeter do\n  def greet(name), do: \"Hello #{name}\"\n  "
                                "defp helper, do: nil\nend\n",
@@ -952,6 +990,211 @@ TEST(elixir_function) {
     ASSERT_NOT_NULL(r);
     ASSERT_FALSE(r->has_error);
     ASSERT(has_def(r, "Function", "greet"));
+    cbm_free_result(r);
+    PASS();
+}
+
+/* A function's QN carries its defmodule, and nested modules compose. Without
+ * this every same-named def in the project collides in one by-name bucket and
+ * the resolver can never pick the right one. */
+TEST(elixir_qn_module_qualified) {
+    CBMFileResult *r = extract("defmodule Plug.Conn do\n"
+                               "  def get_req_header(conn, key) do\n"
+                               "    fetch(conn, key)\n"
+                               "  end\n"
+                               "  defmodule Unfetched do\n"
+                               "    def build(x), do: x\n"
+                               "  end\n"
+                               "end\n",
+                               CBM_LANG_ELIXIR, "t", "lib/conn.ex");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT(has_def_qn(r, "t.lib.conn.Plug.Conn"));
+    ASSERT(has_def_qn(r, "t.lib.conn.Plug.Conn.get_req_header"));
+    /* Nested defmodule composes onto the outer module, not the file. */
+    ASSERT(has_def_qn(r, "t.lib.conn.Plug.Conn.Unfetched"));
+    ASSERT(has_def_qn(r, "t.lib.conn.Plug.Conn.Unfetched.build"));
+    /* Lockstep: the in-body call sources to the module-qualified def QN. */
+    const char *enc = call_enclosing_qn(r, "fetch");
+    ASSERT_NOT_NULL(enc);
+    ASSERT_STR_EQ("t.lib.conn.Plug.Conn.get_req_header", enc);
+    cbm_free_result(r);
+    PASS();
+}
+
+/* Multi-clause defs are one function. A `when` guard wraps the head in a
+ * binary_operator; before this was unwrapped every guarded head was dropped
+ * (102 of them in elixir-plug/plug, including Plug.Conn.get_req_header). */
+TEST(elixir_multi_clause_single_node) {
+    CBMFileResult *r = extract("defmodule Router do\n"
+                               "  def call(conn, %{a: 1}), do: conn\n"
+                               "  def call(conn, opts) when is_map(opts), do: conn\n"
+                               "  def call(conn, _), do: conn\n"
+                               "end\n",
+                               CBM_LANG_ELIXIR, "t", "router.ex");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    /* The guarded clause is extracted (it would be missing entirely otherwise). */
+    ASSERT_EQ(3, count_defs_with_name(r, "call"));
+    /* All three clauses share one QN, so the graph holds a single node. */
+    for (int i = 0; i < r->defs.count; i++) {
+        if (strcmp(r->defs.items[i].name, "call") == 0) {
+            ASSERT_STR_EQ("t.router.Router.call", r->defs.items[i].qualified_name);
+        }
+    }
+    cbm_free_result(r);
+    PASS();
+}
+
+/* `alias Plug.Conn` inside a defmodule body must produce an import — the old
+ * root-children-only walker saw none of them and instead recorded the enclosing
+ * `defmodule` as the import. Grouped and renamed aliases expand too. */
+TEST(elixir_alias_resolves_call) {
+    CBMFileResult *r = extract("defmodule Sample do\n"
+                               "  alias Plug.Conn\n"
+                               "  alias Plug.{Adapters, Utils}\n"
+                               "  alias Plug.Conn.Query, as: Q\n"
+                               "  import Plug.Conn.Utils\n"
+                               "  def run(conn) do\n"
+                               "    Conn.get_req_header(conn, \"x\")\n"
+                               "  end\n"
+                               "end\n",
+                               CBM_LANG_ELIXIR, "t", "sample.ex");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT(has_import(r, "Plug.Conn"));
+    ASSERT(has_import(r, "Plug.Adapters"));
+    ASSERT(has_import(r, "Plug.Utils"));
+    ASSERT(has_import(r, "Plug.Conn.Utils"));
+    /* No import is fabricated from the enclosing defmodule. */
+    ASSERT_FALSE(has_import(r, "Sample"));
+    /* `alias X, as: Q` binds Q — that is the key the resolver's import map uses. */
+    int found_as = 0;
+    for (int i = 0; i < r->imports.count; i++) {
+        if (r->imports.items[i].local_name && strcmp(r->imports.items[i].local_name, "Q") == 0)
+            found_as = 1;
+    }
+    ASSERT(found_as);
+    ASSERT(has_call(r, "Conn.get_req_header"));
+    cbm_free_result(r);
+    PASS();
+}
+
+/* defprotocol is an Interface; defimpl is the module the compiler generates
+ * (`Protocol.Type`) and implements the protocol. */
+TEST(elixir_defimpl_defprotocol) {
+    CBMFileResult *r = extract("defprotocol Size do\n"
+                               "  def size(data)\n"
+                               "end\n"
+                               "defimpl Size, for: BitString do\n"
+                               "  def size(str), do: byte_size(str)\n"
+                               "end\n",
+                               CBM_LANG_ELIXIR, "t", "size.ex");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT(has_def(r, "Interface", "Size"));
+    ASSERT(has_def(r, "Class", "Size.BitString"));
+    ASSERT(has_base_class(r, "Size.BitString", "Size"));
+    /* The impl's function is scoped to the generated module, not the file. */
+    ASSERT(has_def_qn(r, "t.size.Size.BitString.size"));
+    cbm_free_result(r);
+    PASS();
+}
+
+/* Definitions nest below the module body all over real Elixir — this is how
+ * Plug.Builder and most of Phoenix define functions. The old walk pushed only
+ * the defmodule's DIRECT do_block children and saw none of them. */
+TEST(elixir_def_inside_quote) {
+    CBMFileResult *r = extract("defmodule Builder do\n"
+                               "  defmacro __using__(_opts) do\n"
+                               "    quote do\n"
+                               "      def init(opts), do: opts\n"
+                               "      def call(conn, opts), do: conn\n"
+                               "    end\n"
+                               "  end\n"
+                               "  if Code.ensure_loaded?(X) do\n"
+                               "    def conditional, do: :ok\n"
+                               "  end\n"
+                               "end\n",
+                               CBM_LANG_ELIXIR, "t", "builder.ex");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT(has_def_qn(r, "t.builder.Builder.__using__"));
+    ASSERT(has_def_qn(r, "t.builder.Builder.init"));
+    ASSERT(has_def_qn(r, "t.builder.Builder.call"));
+    ASSERT(has_def_qn(r, "t.builder.Builder.conditional"));
+    cbm_free_result(r);
+    PASS();
+}
+
+/* Module attributes are Elixir's constants. Documentation, typing and
+ * compiler-directive attributes are not, and a bare `@attr` reference is a read
+ * rather than a definition — none of those may become nodes. */
+TEST(elixir_module_attribute_variable) {
+    CBMFileResult *r = extract("defmodule Cfg do\n"
+                               "  @moduledoc \"docs\"\n"
+                               "  @doc \"more\"\n"
+                               "  @spec run(term) :: term\n"
+                               "  @type t :: term\n"
+                               "  @behaviour Plug\n"
+                               "  @timeout 5_000\n"
+                               "  @default_opts [a: 1]\n"
+                               "  def run(x) do\n"
+                               "    @timeout\n"
+                               "  end\n"
+                               "end\n",
+                               CBM_LANG_ELIXIR, "t", "cfg.ex");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT(has_def(r, "Variable", "@timeout"));
+    ASSERT(has_def(r, "Variable", "@default_opts"));
+    ASSERT_EQ(2, count_defs_with_label(r, "Variable"));
+    ASSERT(has_def_qn(r, "t.cfg.Cfg.@timeout"));
+    cbm_free_result(r);
+    PASS();
+}
+
+/* `@behaviour X` is Elixir's interface contract; a module declaring @callback
+ * IS the behaviour, so it is labelled Interface and pass_semantic emits
+ * IMPLEMENTS (rather than INHERITS) for its implementors. */
+TEST(elixir_behaviour_implements) {
+    CBMFileResult *r = extract("defmodule Plug do\n"
+                               "  @callback init(opts :: term) :: term\n"
+                               "  @callback call(conn :: term, opts :: term) :: term\n"
+                               "end\n"
+                               "defmodule Plug.Logger do\n"
+                               "  @behaviour Plug\n"
+                               "  def init(opts), do: opts\n"
+                               "end\n",
+                               CBM_LANG_ELIXIR, "t", "logger.ex");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT(has_def(r, "Interface", "Plug"));
+    ASSERT(has_def(r, "Class", "Plug.Logger"));
+    ASSERT(has_base_class(r, "Plug.Logger", "Plug"));
+    cbm_free_result(r);
+    PASS();
+}
+
+/* A parenthesis-less pipe stage is a call. `conn |> put_resp(1)` needs nothing
+ * special (its right operand is a call node visited on its own), but
+ * `conn |> halt` and `conn |> IO.inspect` are a bare identifier / dot that no
+ * other branch turns into a callee. */
+TEST(elixir_pipe_bare_callee) {
+    CBMFileResult *r = extract("defmodule P do\n"
+                               "  def run(conn) do\n"
+                               "    conn |> halt\n"
+                               "    conn |> IO.inspect\n"
+                               "    conn |> put_resp_header(\"a\", \"b\")\n"
+                               "  end\n"
+                               "end\n",
+                               CBM_LANG_ELIXIR, "t", "p.ex");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT(has_call(r, "halt"));
+    ASSERT(has_call(r, "IO.inspect"));
+    ASSERT(has_call(r, "put_resp_header"));
+    ASSERT_STR_EQ("t.p.P.run", call_enclosing_qn(r, "halt"));
     cbm_free_result(r);
     PASS();
 }
@@ -5141,6 +5384,14 @@ SUITE(extraction) {
 
     /* Functional */
     RUN_TEST(elixir_function);
+    RUN_TEST(elixir_qn_module_qualified);
+    RUN_TEST(elixir_multi_clause_single_node);
+    RUN_TEST(elixir_alias_resolves_call);
+    RUN_TEST(elixir_defimpl_defprotocol);
+    RUN_TEST(elixir_def_inside_quote);
+    RUN_TEST(elixir_module_attribute_variable);
+    RUN_TEST(elixir_behaviour_implements);
+    RUN_TEST(elixir_pipe_bare_callee);
     RUN_TEST(haskell_function);
     RUN_TEST(ocaml_function);
     RUN_TEST(erlang_function);

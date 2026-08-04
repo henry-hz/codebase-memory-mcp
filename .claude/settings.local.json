@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(mkdir -p /tmp/lang-bench)",
+      "Read(//tmp/**)",
+      "Bash(git clone *)"
+    ]
+  }
+}

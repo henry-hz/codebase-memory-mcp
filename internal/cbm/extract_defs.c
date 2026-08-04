@@ -4637,34 +4637,185 @@ static void extract_rust_impl(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec
 
 // --- Elixir def/defp/defmodule ---
 
-// Get the "arguments" node for an Elixir call, with fallback to second child.
-static TSNode elixir_call_args(TSNode node) {
-    TSNode args = ts_node_child_by_field_name(node, TS_FIELD("arguments"));
-    if (ts_node_is_null(args) && ts_node_child_count(node) > SECOND_CHILD_IDX) {
-        args = ts_node_child(node, SECOND_CHILD_IDX);
+/* Split an Elixir module attribute node into its name and value. `@timeout 5_000`
+ * is a unary_operator whose `@` operand is the call `timeout 5_000`. Returns NULL
+ * for anything else — notably a bare attribute REFERENCE (`@timeout` on its own,
+ * whose operand is an identifier), which is a read, not a definition. */
+static const char *elixir_attr_name(CBMExtractCtx *ctx, TSNode node, TSNode *out_value) {
+    if (strcmp(ts_node_type(node), "unary_operator") != 0) {
+        return NULL;
     }
-    return args;
+    TSNode op = ts_node_child_by_field_name(node, TS_FIELD("operator"));
+    if (ts_node_is_null(op) || ts_node_end_byte(op) - ts_node_start_byte(op) != 1 ||
+        ctx->source[ts_node_start_byte(op)] != '@') {
+        return NULL;
+    }
+    TSNode operand = ts_node_child_by_field_name(node, TS_FIELD("operand"));
+    if (ts_node_is_null(operand) || strcmp(ts_node_type(operand), "call") != 0 ||
+        ts_node_child_count(operand) == 0) {
+        return NULL;
+    }
+    TSNode target = ts_node_child(operand, 0);
+    if (ts_node_is_null(target) || strcmp(ts_node_type(target), "identifier") != 0) {
+        return NULL;
+    }
+    if (out_value) {
+        *out_value = cbm_elixir_call_args(operand);
+    }
+    return cbm_node_text(ctx->arena, target, ctx->source);
 }
 
-// Handle Elixir def/defp/defmacro — extract function definition.
-static void extract_elixir_func_def(CBMExtractCtx *ctx, TSNode node, const char *macro) {
+/* Documentation, typing, behaviour-contract and compiler-directive attributes.
+ * These carry no value the graph can use as a constant, and @behaviour is
+ * consumed separately as an IMPLEMENTS source. */
+static bool elixir_attr_is_metadata(const char *name) {
+    static const char *skip[] = {"moduledoc",
+                                 "doc",
+                                 "typedoc",
+                                 "spec",
+                                 "type",
+                                 "typep",
+                                 "opaque",
+                                 "callback",
+                                 "macrocallback",
+                                 "optional_callbacks",
+                                 "behaviour",
+                                 "behavior",
+                                 "impl",
+                                 "deprecated",
+                                 "since",
+                                 "derive",
+                                 "enforce_keys",
+                                 "dialyzer",
+                                 "compile",
+                                 "external_resource",
+                                 "file",
+                                 "before_compile",
+                                 "after_compile",
+                                 "on_definition",
+                                 "on_load",
+                                 "tag",
+                                 "moduletag",
+                                 "describetag",
+                                 NULL};
+    for (int i = 0; skip[i]; i++) {
+        if (strcmp(name, skip[i]) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Scan a module body for the attributes that shape its Class node: the
+ * `@behaviour`s it declares (→ base_classes, which pass_semantic turns into
+ * IMPLEMENTS/INHERITS) and whether it declares `@callback`s (→ it IS a
+ * behaviour, i.e. an Interface). Only direct children of the do_block are
+ * module attributes; anything deeper belongs to a function body. */
+static const char **elixir_scan_module_attrs(CBMExtractCtx *ctx, TSNode do_block,
+                                             bool *out_is_behaviour) {
     CBMArena *a = ctx->arena;
-    TSNode args = elixir_call_args(node);
-    if (ts_node_is_null(args)) {
+    *out_is_behaviour = false;
+    if (ts_node_is_null(do_block)) {
+        return NULL;
+    }
+    enum { MAX_BEHAVIOURS = 8 };
+    const char *bases[MAX_BEHAVIOURS];
+    int bcount = 0;
+
+    for (uint32_t i = 0; i < ts_node_named_child_count(do_block); i++) {
+        TSNode child = ts_node_named_child(do_block, i);
+        TSNode value = {0};
+        const char *attr = elixir_attr_name(ctx, child, &value);
+        if (!attr) {
+            continue;
+        }
+        if (strcmp(attr, "callback") == 0 || strcmp(attr, "macrocallback") == 0) {
+            *out_is_behaviour = true;
+            continue;
+        }
+        if (strcmp(attr, "behaviour") != 0 && strcmp(attr, "behavior") != 0) {
+            continue;
+        }
+        if (ts_node_is_null(value) || bcount >= MAX_BEHAVIOURS) {
+            continue;
+        }
+        TSNode mod = ts_node_named_child_count(value) > 0 ? ts_node_named_child(value, 0) : value;
+        char *bname = cbm_node_text(a, mod, ctx->source);
+        if (bname && bname[0]) {
+            bases[bcount++] = bname;
+        }
+    }
+    if (bcount == 0) {
+        return NULL;
+    }
+    const char **result = (const char **)cbm_arena_alloc(a, sizeof(char *) * (size_t)(bcount + 1));
+    if (!result) {
+        return NULL;
+    }
+    for (int k = 0; k < bcount; k++) {
+        result[k] = bases[k];
+    }
+    result[bcount] = NULL;
+    return result;
+}
+
+/* Emit a Variable for every value-carrying module attribute in a module body.
+ * These are Elixir's constants (`@timeout 5_000`); without them the graph holds
+ * no Elixir Variables at all. The `@` is kept in the name so an attribute can
+ * never collide with the same-named function in the same module. */
+static void emit_elixir_module_attr_vars(CBMExtractCtx *ctx, TSNode do_block,
+                                         const char *module_qn) {
+    CBMArena *a = ctx->arena;
+    if (ts_node_is_null(do_block)) {
+        return;
+    }
+    for (uint32_t i = 0; i < ts_node_named_child_count(do_block); i++) {
+        TSNode child = ts_node_named_child(do_block, i);
+        TSNode value = {0};
+        const char *attr = elixir_attr_name(ctx, child, &value);
+        if (!attr || !attr[0] || elixir_attr_is_metadata(attr) || ts_node_is_null(value)) {
+            continue;
+        }
+        const char *name = cbm_arena_sprintf(a, "@%s", attr);
+        CBMDefinition def;
+        memset(&def, 0, sizeof(def));
+        def.name = name;
+        def.qualified_name = cbm_elixir_scoped_qn(a, ctx->project, ctx->rel_path, module_qn, name);
+        def.label = "Variable";
+        def.file_path = ctx->rel_path;
+        def.parent_class = module_qn;
+        def.start_line = ts_node_start_point(child).row + TS_LINE_OFFSET;
+        def.end_line = ts_node_end_point(child).row + TS_LINE_OFFSET;
+        cbm_defs_push(&ctx->result->defs, a, def);
+    }
+}
+
+// Handle Elixir def/defp/defmacro/defmacrop/defguard/defguardp/defdelegate.
+// `module_qn` is the enclosing defmodule's QN, or NULL at file scope.
+static void extract_elixir_func_def(CBMExtractCtx *ctx, TSNode node, const char *macro,
+                                    const char *module_qn) {
+    CBMArena *a = ctx->arena;
+    TSNode args = cbm_elixir_call_args(node);
+    /* Named child, so a parenthesised `def(foo(x))` skips the "(" token. */
+    if (ts_node_is_null(args) || ts_node_named_child_count(args) == 0) {
         return;
     }
 
-    TSNode first_arg = ts_node_child(args, 0);
+    TSNode first_arg = ts_node_named_child(args, 0);
     if (ts_node_is_null(first_arg)) {
         return;
     }
+    // `def foo(a) when is_x(a)` puts the head under a `when` binary_operator.
+    TSNode head = cbm_elixir_def_head(first_arg, ctx->source);
 
-    const char *fk = ts_node_type(first_arg);
+    const char *fk = ts_node_type(head);
     char *name = NULL;
-    if (strcmp(fk, "call") == 0 && ts_node_child_count(first_arg) > 0) {
-        name = cbm_node_text(a, ts_node_child(first_arg, 0), ctx->source);
+    TSNode params = {0};
+    if (strcmp(fk, "call") == 0 && ts_node_child_count(head) > 0) {
+        name = cbm_node_text(a, ts_node_child(head, 0), ctx->source);
+        params = ts_node_child_by_field_name(head, TS_FIELD("arguments"));
     } else if (strcmp(fk, "identifier") == 0) {
-        name = cbm_node_text(a, first_arg, ctx->source);
+        name = cbm_node_text(a, head, ctx->source);
     }
     if (!name || !name[0]) {
         return;
@@ -4673,54 +4824,117 @@ static void extract_elixir_func_def(CBMExtractCtx *ctx, TSNode node, const char 
     CBMDefinition def;
     memset(&def, 0, sizeof(def));
     def.name = name;
-    def.qualified_name = cbm_fqn_compute(a, ctx->project, ctx->rel_path, name);
+    def.qualified_name = cbm_elixir_scoped_qn(a, ctx->project, ctx->rel_path, module_qn, name);
     def.label = "Function";
     def.file_path = ctx->rel_path;
+    def.parent_class = module_qn;
     def.start_line = ts_node_start_point(node).row + TS_LINE_OFFSET;
     def.end_line = ts_node_end_point(node).row + TS_LINE_OFFSET;
-    def.is_exported = (strcmp(macro, "def") == 0 || strcmp(macro, "defmacro") == 0);
+    def.is_exported = (strcmp(macro, "defp") != 0 && strcmp(macro, "defmacrop") != 0 &&
+                       strcmp(macro, "defguardp") != 0);
+    if (!ts_node_is_null(params)) {
+        def.signature = cbm_node_text(a, params, ctx->source);
+    }
     cbm_defs_push(&ctx->result->defs, a, def);
 }
 
-// Emit Class definition for an Elixir defmodule node. Returns do_block or null.
-static TSNode emit_elixir_module_class(CBMExtractCtx *ctx, TSNode cur) {
+/* Emit the Class for an Elixir module container (defmodule / defprotocol /
+ * defimpl) and return its qualified name — the scope every definition in its
+ * body is named under. `parent_qn` is the enclosing module's QN (nested
+ * `defmodule Inner` inside `Outer` becomes `Outer.Inner`). *out_do_block
+ * receives the body. Returns NULL when the node names no module. */
+static const char *emit_elixir_module_class(CBMExtractCtx *ctx, TSNode cur, const char *macro,
+                                            const char *parent_qn, TSNode *out_do_block) {
     CBMArena *a = ctx->arena;
     TSNode null_node = {0};
-    TSNode args = elixir_call_args(cur);
-    if (ts_node_is_null(args)) {
-        return null_node;
+    *out_do_block = null_node;
+    const char *name = cbm_elixir_module_name(a, cur, ctx->source);
+    if (!name) {
+        return NULL;
     }
-    TSNode name_node = ts_node_child(args, 0);
-    if (ts_node_is_null(name_node)) {
-        return null_node;
-    }
-    char *name = cbm_node_text(a, name_node, ctx->source);
-    if (!name || !name[0]) {
-        return null_node;
-    }
+    TSNode do_block = cbm_find_child_by_kind(cur, "do_block");
+    *out_do_block = do_block;
+
     CBMDefinition def;
     memset(&def, 0, sizeof(def));
-    def.name = name;
-    def.qualified_name = cbm_fqn_compute(a, ctx->project, ctx->rel_path, name);
     def.label = "Class";
+
+    if (strcmp(macro, "defimpl") == 0) {
+        /* `defimpl Enumerable, for: List` implements the Enumerable protocol
+         * (the module name already carries the `for:` target). */
+        TSNode args = cbm_elixir_call_args(cur);
+        const char **bases = (const char **)cbm_arena_alloc(a, sizeof(char *) * 2);
+        if (bases && !ts_node_is_null(args) && ts_node_named_child_count(args) > 0) {
+            bases[0] = cbm_node_text(a, ts_node_named_child(args, 0), ctx->source);
+            bases[1] = NULL;
+            def.base_classes = bases;
+        }
+    } else if (strcmp(macro, "defprotocol") == 0) {
+        /* A protocol IS the interface; pass_semantic keys IMPLEMENTS off the
+         * base node's label being Interface. */
+        def.label = "Interface";
+    } else {
+        bool is_behaviour = false;
+        def.base_classes = elixir_scan_module_attrs(ctx, do_block, &is_behaviour);
+        if (is_behaviour) {
+            def.label = "Interface"; // declares @callback — it is a behaviour
+        }
+    }
+
+    def.name = name;
+    def.qualified_name = cbm_elixir_scoped_qn(a, ctx->project, ctx->rel_path, parent_qn, name);
     def.file_path = ctx->rel_path;
+    def.parent_class = parent_qn;
     def.start_line = ts_node_start_point(cur).row + TS_LINE_OFFSET;
     def.end_line = ts_node_end_point(cur).row + TS_LINE_OFFSET;
     def.is_exported = true;
     cbm_defs_push(&ctx->result->defs, a, def);
-    return cbm_find_child_by_kind(cur, "do_block");
+    return def.qualified_name;
 }
 
-// Process Elixir call nodes iteratively — handles defmodule/def/defp/defmacro
-// without recursion between extract_elixir_call ↔ extract_elixir_module_def.
+/* One frame of the Elixir def walk: a `call` node plus the QN of the defmodule
+ * that lexically encloses it (NULL at file scope). */
+typedef struct {
+    TSNode node;
+    const char *module_qn;
+} elixir_frame_t;
+
+typedef struct {
+    elixir_frame_t *items;
+    int count;
+    int cap;
+} elixir_stack_t;
+
+static void elixir_stack_push(elixir_stack_t *s, CBMArena *a, TSNode node, const char *module_qn) {
+    if (s->count >= s->cap) {
+        int ncap = s->cap ? s->cap * 2 : CBM_SZ_64;
+        elixir_frame_t *ni = (elixir_frame_t *)cbm_arena_alloc(a, (size_t)ncap * sizeof(*ni));
+        if (!ni) {
+            return; // OOM: best-effort, stop growing
+        }
+        if (s->items && s->count > 0) {
+            memcpy(ni, s->items, (size_t)s->count * sizeof(*ni));
+        }
+        s->items = ni; // old block abandoned in the arena
+        s->cap = ncap;
+    }
+    s->items[s->count].node = node;
+    s->items[s->count].module_qn = module_qn;
+    s->count++;
+}
+
+// Process Elixir call nodes iteratively — handles the def* family and the
+// module containers without recursion (Elixir metaprogramming nests deeply;
+// see tests/test_stack_overflow.c for why recursion here is not an option).
 static void extract_elixir_call(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec *spec) {
     (void)spec;
-    TSNodeStack stack;
-    ts_nstack_init(&stack, ctx->arena, CBM_SZ_64);
-    ts_nstack_push(&stack, ctx->arena, node);
+    elixir_stack_t stack = {0};
+    elixir_stack_push(&stack, ctx->arena, node, ctx->enclosing_class_qn);
 
     while (stack.count > 0) {
-        TSNode cur = ts_nstack_pop(&stack);
+        elixir_frame_t frame = stack.items[--stack.count];
+        TSNode cur = frame.node;
+        const char *module_qn = frame.module_qn;
         CBMArena *a = ctx->arena;
 
         if (ts_node_child_count(cur) == 0) {
@@ -4735,20 +4949,47 @@ static void extract_elixir_call(CBMExtractCtx *ctx, TSNode node, const CBMLangSp
             continue;
         }
 
-        if (strcmp(macro, "def") == 0 || strcmp(macro, "defp") == 0 ||
-            strcmp(macro, "defmacro") == 0) {
-            extract_elixir_func_def(ctx, cur, macro);
-        } else if (strcmp(macro, "defmodule") == 0) {
-            TSNode do_block = emit_elixir_module_class(ctx, cur);
-            if (!ts_node_is_null(do_block)) {
-                uint32_t dbc = ts_node_child_count(do_block);
-                for (int di = (int)dbc - SKIP_CHAR; di >= 0; di--) {
-                    TSNode dchild = ts_node_child(do_block, (uint32_t)di);
-                    if (!ts_node_is_null(dchild) && strcmp(ts_node_type(dchild), "call") == 0) {
-                        ts_nstack_push(&stack, ctx->arena, dchild);
-                    }
-                }
+        TSNode do_block = cbm_find_child_by_kind(cur, "do_block");
+        const char *body_module_qn = module_qn;
+
+        if (cbm_elixir_is_module_macro(macro)) {
+            const char *mqn = emit_elixir_module_class(ctx, cur, macro, module_qn, &do_block);
+            if (mqn) {
+                body_module_qn = mqn;
+                emit_elixir_module_attr_vars(ctx, do_block, mqn);
             }
+        } else if (cbm_elixir_is_func_macro(macro)) {
+            extract_elixir_func_def(ctx, cur, macro, module_qn);
+        }
+
+        /* Descend into ANY do_block, not just a defmodule's. Definitions live one
+         * or more levels deeper than the module body all over real Elixir: inside
+         * `defimpl`, inside the `quote do` of a `__using__` macro (how Plug.Builder
+         * and most of Phoenix define functions), inside `if`/`unless`/`for`, and in
+         * nested `defmodule`s. A non-def call with a body costs one pop and emits
+         * nothing, so the uniform rule is cheaper than enumerating containers. */
+        if (ts_node_is_null(do_block)) {
+            continue;
+        }
+        /* One cursor pass, then reverse the pushed segment so children pop in
+         * source order — ts_node_child(n, i) is O(i), and this loop now runs for
+         * EVERY call with a body (`test "..." do` blocks included), not just a
+         * defmodule's. Same reasoning as ts_nstack_push_children(). */
+        int base = stack.count;
+        TSTreeCursor cursor = ts_tree_cursor_new(do_block);
+        if (ts_tree_cursor_goto_first_child(&cursor)) {
+            do {
+                TSNode dchild = ts_tree_cursor_current_node(&cursor);
+                if (!ts_node_is_null(dchild) && strcmp(ts_node_type(dchild), "call") == 0) {
+                    elixir_stack_push(&stack, a, dchild, body_module_qn);
+                }
+            } while (ts_tree_cursor_goto_next_sibling(&cursor));
+        }
+        ts_tree_cursor_delete(&cursor);
+        for (int lo = base, hi = stack.count - 1; lo < hi; lo++, hi--) {
+            elixir_frame_t tmp = stack.items[lo];
+            stack.items[lo] = stack.items[hi];
+            stack.items[hi] = tmp;
         }
     }
 }

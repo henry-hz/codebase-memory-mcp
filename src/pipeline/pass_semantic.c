@@ -97,6 +97,11 @@ static int build_import_map(cbm_pipeline_ctx_t *ctx, const char *rel_path,
             const cbm_gbuf_node_t *target = cbm_gbuf_find_by_qn(ctx->gbuf, target_qn);
             free(target_qn);
             if (!target) {
+                /* module_path is a dotted module NAME, not a file path
+                 * (Elixir `alias Plug.Conn`) — fqn_module mangles it. */
+                target = cbm_pipeline_find_dotted_module(ctx->gbuf, imp->module_path);
+            }
+            if (!target) {
                 continue;
             }
             keys[count] = strdup(imp->local_name);

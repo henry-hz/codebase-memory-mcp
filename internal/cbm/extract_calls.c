@@ -440,6 +440,27 @@ static char *extract_scripting_callee(CBMArena *a, TSNode node, const char *sour
         }
         return NULL;
     }
+    /* Elixir pipe with no parentheses: `conn |> halt`, `conn |> IO.inspect`.
+     * The parenthesised form `conn |> put_resp_header("a", "b")` needs nothing
+     * here — its right operand is itself a `call` node and is visited on its
+     * own. The bare form's right operand is a plain identifier/dot, which no
+     * other branch turns into a callee, so each one is a lost CALLS edge. */
+    if (lang == CBM_LANG_ELIXIR && strcmp(nk, "binary_operator") == 0) {
+        TSNode op = ts_node_child_by_field_name(node, TS_FIELD("operator"));
+        if (ts_node_is_null(op) || ts_node_end_byte(op) - ts_node_start_byte(op) != 2 ||
+            strncmp(source + ts_node_start_byte(op), "|>", 2) != 0) {
+            return NULL;
+        }
+        TSNode rhs = ts_node_child_by_field_name(node, TS_FIELD("right"));
+        if (ts_node_is_null(rhs)) {
+            return NULL;
+        }
+        const char *rk = ts_node_type(rhs);
+        if (strcmp(rk, "identifier") == 0 || strcmp(rk, "dot") == 0) {
+            return cbm_node_text(a, rhs, source);
+        }
+        return NULL;
+    }
     if (lang == CBM_LANG_PERL && ts_node_child_count(node) > 0) {
         // Pull the actual sub/method name token rather than blindly taking
         // child(0). Grammar (verified against the vendored parser):

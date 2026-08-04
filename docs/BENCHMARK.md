@@ -7,7 +7,20 @@
 - **Real open-source repos** (medium to large: 78--49K nodes)
 - **Grading**: PASS (1.0) / PARTIAL (0.5) / FAIL (0.0), N/A excluded from denominator
 - **Platform**: Apple M3 Pro, macOS Darwin 25.3.0
-- **Date**: 2026-03-01
+- **Date**: 2026-03-01 (Elixir re-measured 2026-08-04 — see that section)
+
+> **Known scoring discrepancy in the 2026-03-01 run.** Every per-language table
+> below that contains a PARTIAL disagrees with its own **Score** line by exactly
+> 0.5 per PARTIAL: the numerator recorded is `#PASS − 0.5 × #PARTIAL`, not the
+> `#PASS + 0.5 × #PARTIAL` the rubric above specifies. Verified against Python,
+> JavaScript, Erlang, Elixir, OCaml, Haskell, Scala, Ruby and Swift; rows with no
+> PARTIAL (Lua, Perl, Bash, …) tally correctly. Under the stated rubric those nine
+> rows would each score 1.0 higher per PARTIAL — e.g. Python 11.5/12 rather than
+> 10.5/12. Swift additionally shows a denominator of 11 with no N/A question.
+> Correcting this means re-deriving every affected row together, which is a
+> separate change; the rows are left as originally recorded so they stay mutually
+> comparable. The Elixir row re-measured on 2026-08-04 has no PARTIAL, so its
+> 12/12 is identical under either reading.
 
 ### The 12 Questions
 
@@ -40,28 +53,28 @@ Config/markup languages (HTML, CSS, SCSS, YAML, TOML, HCL, SQL, Dockerfile) run 
 | 4 | Perl | mojolicious/mojo | 3,287 | 4,182 | 12/12 | 100% | 1 |
 | 5 | Objective-C | AFNetworking | 1,087 | 1,348 | 12/12 | 100% | 1 |
 | 6 | Groovy | spockframework/spock | 14,081 | 34,557 | 12/12 | 100% | 1 |
-| 7 | C | jqlang/jq | 1,330 | 3,923 | 11/11 | 100% | 1 |
-| 8 | Bash | bats-core/bats-core | 436 | 479 | 10/10 | 100% | 1 |
-| 9 | Zig | zigtools/zls | 2,824 | 10,230 | 10/10 | 100% | 1 |
-| 10 | Swift | Alamofire/Alamofire | 3,631 | 7,639 | 10.5/11 | 95% | 1 |
-| 11 | CSS | animate-css/animate.css | 295 | 214 | 4/4 | 100% | 1 |
-| 12 | YAML | kubernetes/examples | 2,110 | 1,844 | 4/4 | 100% | 1 |
-| 13 | TOML | rust-lang/cargo | 16,773 | 51,403 | 4/4 | 100% | 1 |
-| 14 | HTML | twbs/bootstrap | 2,726 | 4,135 | 4/4 | 100% | 1 |
-| 15 | SCSS | twbs/bootstrap | 2,726 | 4,135 | 4/4 | 100% | 1 |
-| 16 | HCL | hashicorp/terraform | 78 | 76 | 4/4 | 100% | 1 |
-| 17 | Dockerfile | docker-library/official-images | 1,481 | 1,588 | 4/4 | 100% | 1 |
-| 18 | Python | django/django | 49,398 | 196,022 | 10.5/12 | 87% | 2 |
-| 19 | TypeScript | nestjs/nest | 9,063 | 15,772 | 10.5/12 | 87% | 2 |
-| 20 | TSX | shadcn-ui/ui | 29,755 | 41,883 | 10.5/12 | 87% | 2 |
-| 21 | Go | codebase-memory-mcp (self) | 2,259 | 6,561 | 10.5/12 | 87% | 2 |
-| 22 | Rust | BurntSushi/ripgrep | 4,118 | 6,971 | 10.5/12 | 87% | 2 |
-| 23 | Java | spring-projects/spring-petclinic | 660 | 1,080 | 10.5/12 | 87% | 2 |
-| 24 | R | tidyverse/dplyr | 1,618 | 2,409 | 10.5/12 | 87% | 2 |
-| 25 | Dart | felangel/bloc | 5,089 | 6,430 | 10.5/12 | 87% | 2 |
-| 26 | JavaScript | lodash/lodash | 244 | 405 | 9.5/11 | 86% | 2 |
-| 27 | Erlang | ninenines/cowboy | 3,270 | 9,815 | 9.5/11 | 86% | 2 |
-| 28 | Elixir | elixir-plug/plug | 870 | 865 | 9.5/11 | 86% | 2 |
+| 7 | Elixir | elixir-plug/plug | 1,129 | 3,167 | 12/12 | 100% | 1 |
+| 8 | C | jqlang/jq | 1,330 | 3,923 | 11/11 | 100% | 1 |
+| 9 | Bash | bats-core/bats-core | 436 | 479 | 10/10 | 100% | 1 |
+| 10 | Zig | zigtools/zls | 2,824 | 10,230 | 10/10 | 100% | 1 |
+| 11 | Swift | Alamofire/Alamofire | 3,631 | 7,639 | 10.5/11 | 95% | 1 |
+| 12 | CSS | animate-css/animate.css | 295 | 214 | 4/4 | 100% | 1 |
+| 13 | YAML | kubernetes/examples | 2,110 | 1,844 | 4/4 | 100% | 1 |
+| 14 | TOML | rust-lang/cargo | 16,773 | 51,403 | 4/4 | 100% | 1 |
+| 15 | HTML | twbs/bootstrap | 2,726 | 4,135 | 4/4 | 100% | 1 |
+| 16 | SCSS | twbs/bootstrap | 2,726 | 4,135 | 4/4 | 100% | 1 |
+| 17 | HCL | hashicorp/terraform | 78 | 76 | 4/4 | 100% | 1 |
+| 18 | Dockerfile | docker-library/official-images | 1,481 | 1,588 | 4/4 | 100% | 1 |
+| 19 | Python | django/django | 49,398 | 196,022 | 10.5/12 | 87% | 2 |
+| 20 | TypeScript | nestjs/nest | 9,063 | 15,772 | 10.5/12 | 87% | 2 |
+| 21 | TSX | shadcn-ui/ui | 29,755 | 41,883 | 10.5/12 | 87% | 2 |
+| 22 | Go | codebase-memory-mcp (self) | 2,259 | 6,561 | 10.5/12 | 87% | 2 |
+| 23 | Rust | BurntSushi/ripgrep | 4,118 | 6,971 | 10.5/12 | 87% | 2 |
+| 24 | Java | spring-projects/spring-petclinic | 660 | 1,080 | 10.5/12 | 87% | 2 |
+| 25 | R | tidyverse/dplyr | 1,618 | 2,409 | 10.5/12 | 87% | 2 |
+| 26 | Dart | felangel/bloc | 5,089 | 6,430 | 10.5/12 | 87% | 2 |
+| 27 | JavaScript | lodash/lodash | 244 | 405 | 9.5/11 | 86% | 2 |
+| 28 | Erlang | ninenines/cowboy | 3,270 | 9,815 | 9.5/11 | 86% | 2 |
 | 29 | Scala | playframework/playframework | 19,627 | 43,764 | 9/12 | 75% | 2 |
 | 30 | Ruby | sinatra/sinatra | 1,377 | 1,893 | 9/12 | 75% | 2 |
 | 31 | PHP | laravel/framework | 38,644 | 161,242 | 9/12 | 75% | 2 |
@@ -76,8 +89,8 @@ Config/markup languages (HTML, CSS, SCSS, YAML, TOML, HCL, SQL, Dockerfile) run 
 
 | Tier | Range | Count | Languages |
 |------|-------|------:|-----------|
-| **Tier 1** -- Excellent | >= 90% | 17 | Lua, Kotlin, C++, Perl, Objective-C, Groovy, C, Bash, Zig, Swift, CSS, YAML, TOML, HTML, SCSS, HCL, Dockerfile |
-| **Tier 2** -- Good | 75--89% | 16 | Python, TypeScript, TSX, Go, Rust, Java, R, Dart, JavaScript, Erlang, Elixir, Scala, Ruby, PHP, C#, SQL |
+| **Tier 1** -- Excellent | >= 90% | 18 | Lua, Kotlin, C++, Perl, Objective-C, Groovy, Elixir, C, Bash, Zig, Swift, CSS, YAML, TOML, HTML, SCSS, HCL, Dockerfile |
+| **Tier 2** -- Good | 75--89% | 15 | Python, TypeScript, TSX, Go, Rust, Java, R, Dart, JavaScript, Erlang, Scala, Ruby, PHP, C#, SQL |
 | **Tier 3** -- Functional | < 75% | 2 | OCaml (72%), Haskell (62%) |
 
 ---
@@ -510,24 +523,36 @@ passing. Total project tests: 2913 / 0 failed.
 ### Elixir (elixir-plug/plug)
 
 **Project**: `plug-elixir` | **Repo**: `/tmp/lang-bench/plug-elixir`
-**Nodes**: 870 | **Edges**: 865
+**Nodes**: 1,129 | **Edges**: 3,167
+
+> Re-measured 2026-08-04 after the Elixir extraction work in `docs/elixir-boost.md`
+> (module-qualified QNs, guarded def heads, the full `def*` family, nested-container
+> descent, real `alias`/`import` edges, module attributes, `@behaviour`/`defimpl`,
+> bare pipe callees). Every other row in this document is from the 2026-03-01 run;
+> node/edge counts are therefore comparable across questions within this row but
+> not directly against other languages' 2026-03-01 counts.
+>
+> Prior measurement, same repo, same questions: 870 nodes / 865 edges, 9.5/11 (86%).
+> On the code as it stood immediately before this change the same index produced
+> 989 nodes / 2,636 edges — so part of the gap to the 2026-03-01 numbers had
+> already closed through unrelated work.
 
 | Q# | Question | Grade | Attempts | Approach | Notes |
 |----|----------|-------|----------|----------|-------|
-| Q1 | Index Stats | PASS | 1/5 | get_graph_schema | 554 Functions, 129 Classes, 80 Modules |
-| Q2 | Find Functions | PASS | 1/5 | search_graph(Function) | parse_before_param, parse_hd_before_value. 554 total |
-| Q3 | Find Classes | PASS | 1/5 | search_graph(Class) | Plug.Conn, Plug.Debugger, Plug.CSRFProtection. 129 total |
-| Q4 | Pattern Search | PASS | 1/5 | search_graph(name_pattern=parse) | 29 matches |
-| Q5 | Code Snippet | PASS | 1/5 | get_code_snippet | match: 3-line macro source |
-| Q6 | Text Search | PASS | 1/5 | search_code(TODO) | 3 TODOs in adapters/test/conn.ex, ssl.ex |
-| Q7 | Outbound Trace | PASS | 1/5 | trace_call_path(outbound) | 6 edges across 2 hops |
-| Q8 | Inbound Trace | PARTIAL | 1/5 | trace_call_path(inbound) | 0 callers (entry point function) |
-| Q9 | Cypher CALLS | PASS | 1/5 | query_graph | parse_headers->match, skip_preamble->before_parse_headers |
-| Q10 | Properties | PASS | 1/5 | search_graph(Variable) | 6 variables |
-| Q11 | Inheritance | N/A | -- | -- | Elixir uses protocols/behaviours |
-| Q12 | List Directory | PASS | 1/5 | list_directory | 80 modules |
+| Q1 | Index Stats | PASS | 1/5 | get_graph_schema | 624 Functions, 132 Classes, 78 Modules, 70 Variables, 6 Interfaces |
+| Q2 | Find Functions | PASS | 1/5 | search_graph(Function) | `Plug.Builder.__before_compile__`, `Plug.Conn.get_req_header`. 624 total |
+| Q3 | Find Classes | PASS | 1/5 | search_graph(Class) | Plug.Conn, Plug.Parsers.BadEncodingError, Plug.Conn.AlreadySentError. 132 total |
+| Q4 | Pattern Search | PASS | 1/5 | search_graph(name_pattern=parse) | 48 matches |
+| Q5 | Code Snippet | PASS | 1/5 | get_code_snippet | Plug.Conn.get_req_header: 3 lines, conn.ex:694-696 |
+| Q6 | Text Search | PASS | 1/5 | search_code(TODO) | 3 matches in adapters/test/conn.ex, ssl.ex |
+| Q7 | Outbound Trace | PASS | 2/5 | trace_call_path(outbound) | Plug.Conn.send_resp: 17 callees (1st attempt: 4 same-named matches, disambiguated by QN) |
+| Q8 | Inbound Trace | PASS | 1/5 | trace_call_path(inbound) | 24 callers across 2 hops: Plug.CSRFProtection.call, Plug.Debugger.render, Plug.BasicAuth.parse_basic_auth |
+| Q9 | Cypher CALLS | PASS | 1/5 | query_graph | assign->put, async_assign->assign, await_assign->conn |
+| Q10 | Properties | PASS | 1/5 | search_graph(Variable) | 70 module attributes: @already_sent, @alpha, @allowed_methods |
+| Q11 | Inheritance | PASS | 1/5 | query_graph(IMPLEMENTS) | 20 rows: Plug.Logger->Plug, Plug.Session.COOKIE->Plug.Session.Store, Plug.Exception.Any->Plug.Exception |
+| Q12 | List Directory | PASS | 1/5 | get_architecture(structure) | 78 modules, 24 folders, 84 files (the `list_directory` tool the 2026-03-01 run used no longer exists) |
 
-**Score: 9.5/11 (86%)**
+**Score: 12/12 (100%)**
 
 ### Haskell (PostgREST/postgrest)
 

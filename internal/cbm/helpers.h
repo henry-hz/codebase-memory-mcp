@@ -103,6 +103,53 @@ const char *cbm_nix_binding_scope_qn(CBMExtractCtx *ctx, TSNode node, const char
 // attrpath and an enclosing attrset compose into one qualified name.
 const char *cbm_nix_qn_name(CBMArena *a, TSNode func_node, const char *source, const char *name);
 
+// --- Elixir ---
+
+// Compose an Elixir definition's qualified name from the QN of the enclosing
+// `defmodule` (NULL at file scope) and the definition's own name. Called by BOTH
+// extract_defs.c (def side) and extract_unified.c (call-scope side); those two
+// MUST produce byte-identical QNs or every in-body call sources to a QN no node
+// carries and the CALLS edge is dropped at write. Sharing this makes that drift
+// structurally impossible.
+//
+// ARITY IS DELIBERATELY NOT PART OF THE QN. An Elixir function is `name/arity`,
+// but a call site writes `foo(a, b)`, never `foo/2`, and pipes / default args /
+// apply make a call-site arity reconstruction unreliable. The resolver joins
+// callee → definition on the QN's last dot-segment (registry.c simple_name), so
+// a `foo/2` suffix would make EVERY callee miss its target. All clauses and all
+// arities of one name in one module therefore collapse to a single Function
+// node; the parameter list of the first-seen head is kept in `signature`.
+const char *cbm_elixir_scoped_qn(CBMArena *a, const char *project, const char *rel_path,
+                                 const char *parent_qn, const char *name);
+
+// The head node of an Elixir def: `def foo(a) when is_x(a)` wraps the head call
+// in a `when` binary_operator, so unwrap to its left operand. Returns `arg`
+// unchanged when there is no guard. Without this every guarded head — 102 of
+// them in elixir-plug/plug, including Plug.Conn.get_req_header — is dropped.
+TSNode cbm_elixir_def_head(TSNode arg, const char *source);
+
+// True for an Elixir `call` node that defines a module-like container
+// (defmodule / defprotocol / defimpl), given its macro name.
+bool cbm_elixir_is_module_macro(const char *macro);
+
+// True for an Elixir `call` node that defines a callable (def / defp / defmacro
+// / defmacrop / defguard / defguardp / defdelegate), given its macro name.
+bool cbm_elixir_is_func_macro(const char *macro);
+
+// The `arguments` node of an Elixir `call`, falling back to the second child.
+TSNode cbm_elixir_call_args(TSNode node);
+
+// Value node of `key:` inside an Elixir call's keyword-list argument — the
+// `for:` of `defimpl P, for: T`, the `as:` of `alias X, as: Y`. Null node when
+// the key is absent.
+TSNode cbm_elixir_keyword_value(TSNode args, const char *source, const char *key);
+
+// The module NAME an Elixir container macro introduces: `defmodule Plug.Conn` →
+// "Plug.Conn", `defimpl Enumerable, for: List` → "Enumerable.List" (the module
+// the compiler actually generates). NULL when `call_node` is not a module
+// container. Shared so the def side and the call-scope side name it identically.
+const char *cbm_elixir_module_name(CBMArena *a, TSNode call_node, const char *source);
+
 // Resolve a function/method definition node's NAME node across all ~130 grammars
 // (generic `name` field, arrow→declarator, C/C++ declarator chain, plus the many
 // per-language quirks: Fortran subroutine, SCSS mixin, SQL create_function, R,

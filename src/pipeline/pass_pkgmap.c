@@ -1762,6 +1762,30 @@ static const cbm_gbuf_node_t *resolve_sibling_file(const cbm_pipeline_ctx_t *ctx
     return found;
 }
 
+const cbm_gbuf_node_t *cbm_pipeline_find_dotted_module(const cbm_gbuf_t *gbuf,
+                                                       const char *module_path) {
+    if (!gbuf || !module_path || !strchr(module_path, '.')) {
+        return NULL;
+    }
+    const cbm_gbuf_node_t **hits = NULL;
+    int n = 0;
+    if (cbm_gbuf_find_by_name(gbuf, module_path, &hits, &n) != 0 || !hits) {
+        return NULL;
+    }
+    const cbm_gbuf_node_t *best = NULL;
+    for (int i = 0; i < n; i++) {
+        const cbm_gbuf_node_t *cand = hits[i];
+        if (!cand || !import_targetable_label(cand->label)) {
+            continue;
+        }
+        if (!best || (cand->qualified_name && best->qualified_name &&
+                      strcmp(cand->qualified_name, best->qualified_name) < 0)) {
+            best = cand;
+        }
+    }
+    return best;
+}
+
 const cbm_gbuf_node_t *cbm_pipeline_resolve_import_node(const cbm_pipeline_ctx_t *ctx,
                                                         const char *source_rel,
                                                         const char *source_file_qn,
@@ -1908,6 +1932,21 @@ const cbm_gbuf_node_t *cbm_pipeline_resolve_import_node(const cbm_pipeline_ctx_t
             if (*p == '\\' || *p == ':' || *p == '/') {
                 *p = '.';
             }
+        }
+        /* The FULL dotted path, ahead of any single segment. Languages whose
+         * definitions carry their whole dotted name (Elixir: `defmodule
+         * Plug.Conn` is one node named "Plug.Conn") otherwise never match — the
+         * segment walk below only ever offers "Conn" and "Plug", so every
+         * `alias Plug.X` in the project collapsed onto the node named "Plug".
+         * A miss here costs one hash lookup and leaves every other language's
+         * resolution exactly as it was; a hit is a full-name match, which is
+         * strictly more specific than any trailing segment. */
+        char mp_full[1024];
+        snprintf(mp_full, sizeof(mp_full), "%s", mp);
+        if (mp_full[0] && strchr(mp_full, '.') && ncands < 8) {
+            memmove(&cands[1], &cands[0], sizeof(cands[0]) * (size_t)ncands);
+            cands[0] = mp_full;
+            ncands++;
         }
         /* Walk segments from the end. */
         char *end = mp + strlen(mp);

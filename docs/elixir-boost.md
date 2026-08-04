@@ -3,9 +3,11 @@
 **Goal:** move Elixir from Tier 2 (86%, `docs/BENCHMARK.md:64`) to Tier 1 (≥90%), primarily by
 fixing call-graph resolution so `trace_call_path` returns real callers.
 
-**Status:** not started. This document is self-contained — it carries the diagnosis, the reasoning
-behind each step, the exact code locations, and the verification commands, so it can be executed in
-a fresh session with no prior context.
+**Status: EXECUTED (2026-08-04).** Elixir now scores **12/12 (100%)** on `elixir-plug/plug` —
+Tier 1. All six steps landed. Results, and the four places where the diagnosis below turned out to
+be wrong, are in [§9 Execution report](#9-execution-report). Read §9 before trusting §1–§5: they
+are preserved as written so the reasoning can be audited, but the baseline they quote was already
+stale when this was executed.
 
 ---
 
@@ -374,3 +376,147 @@ make -f Makefile.cbm test-par                               # parallel variant, 
 - Q11 changes the denominator; it is not free points.
 - Percentage movement also depends on resolving the 86%-vs-95% bookkeeping question. Settle that
   before claiming a delta.
+
+---
+
+## 9. Execution report
+
+Executed 2026-08-04 on `elixir-plug/plug` (shallow clone, 106 files, 22,483 LOC).
+
+### 9.1 Result
+
+| | Before (2026-03-01, `docs/BENCHMARK.md`) | Before (measured, HEAD 940f484f) | After |
+|---|---|---|---|
+| Nodes | 870 | 989 | **1,129** |
+| Edges | 865 | 2,636 | **3,167** |
+| Edges/node | 1.0 | 2.67 | **2.80** |
+| Function | 554 | 555 | **624** |
+| Class | 129 | 129 | **132** + 6 Interface |
+| Variable | 6 | 8 (none of them Elixir) | **70** |
+| CALLS | — | 1,364 | **1,650** |
+| IMPORTS | — | 41 (28 point at the importing file's own module) | **93** |
+| IMPLEMENTS | — | 0 | **20** |
+| Score | 9.5/11 (86%), Tier 2 | — | **12/12 (100%), Tier 1** |
+
+Q8 Inbound Trace PARTIAL → PASS (0 callers → 24 across 2 hops). Q10 6 non-Elixir Variables → 70
+Elixir module attributes. Q11 N/A → PASS (20 IMPLEMENTS). No question regressed.
+
+### 9.2 Where the diagnosis above was wrong
+
+Four corrections. Each was checked against a real parse before any code changed.
+
+1. **The baseline was five months stale.** §1 leads with "edges per node 1.0 … the graph is
+   essentially nodes plus containment, with almost no `CALLS` edges". At HEAD the same index
+   produced **2.67 edges/node and 1,364 CALLS edges**. Unrelated work had already closed most of
+   that gap. The headline framing was wrong; the specific defects it named were all real.
+
+2. **The 86%-vs-95% "arithmetic discrepancy" is not Elixir-specific and is not stale.** §1 says
+   one of the two numbers must be wrong and to correct whichever it is. In fact *every* row in
+   `docs/BENCHMARK.md` that contains a PARTIAL is short by exactly 0.5 per PARTIAL — the recorded
+   numerator is `#PASS − 0.5 × #PARTIAL`, verified across Python, JavaScript, Erlang, Elixir,
+   OCaml, Haskell, Scala, Ruby and Swift. Rescoring Elixir alone would have made it incomparable
+   with the other 34 rows. The finding is now documented in `docs/BENCHMARK.md`'s methodology
+   section instead, and the affected rows are left as recorded. Moot for the delta claimed here:
+   the new Elixir row has no PARTIAL, so 12/12 is the same under either reading.
+
+3. **Hypothesis D understated the damage.** §3 predicted `alias`/`import` inside a `defmodule`
+   were *missed*. They were — but `parse_generic_imports(ctx, "call")` also matched the top-level
+   `defmodule Foo do … end` call itself and recorded it as an import. That was plug's entire
+   Elixir import graph: 41 IMPORTS edges, 28 of them pointing at the module the importing file
+   itself declares.
+
+4. **Hypothesis E was true but nearly irrelevant, for a reason §4 missed.** `build_import_map`
+   indeed cannot map a dotted module name through `cbm_pipeline_fqn_module()`. But an Elixir alias
+   is by construction a *suffix* of the module it aliases (`alias Plug.Conn` → you write
+   `Conn.foo`), and `registry.c`'s `qualified_suffix_match` (0.90) already resolves exactly that
+   shape — once Step 1 makes the target QN end in `.Plug.Conn.foo`. So Step 1 alone resolves
+   aliased calls; the import-map work is a confidence and correctness improvement, not the recall
+   unlock §3 predicted.
+
+**One defect the plan missed entirely, and it was the largest single source of missing nodes:**
+`def foo(a) when is_binary(a)` wraps the head in a `when` `binary_operator`, and
+`extract_elixir_func_def()` bailed on anything that was not a `call` or `identifier`. **Every
+guarded function head was dropped** — 102 of them in plug, including `Plug.Conn.get_req_header`,
+the function §5's own verification step proposed to trace. Fixed by `cbm_elixir_def_head()`.
+
+### 9.3 Decisions the plan left open
+
+**Arity is NOT part of the qualified name** (§5 Step 1 asked for one policy, documented). An Elixir
+function is `name/arity`, but a call site writes `foo(a, b)`, never `foo/2`, and pipes, default
+arguments and `apply` make call-site arity reconstruction unreliable. More decisively:
+`registry.c`'s `simple_name()` joins callee → definition on the QN's last dot-segment, so a
+trailing `/2` would make **every** callee miss its target — a `foo/2` suffix breaks the resolver
+outright. All clauses and all arities of one name in one module therefore collapse to a single
+Function node; the first-seen head's parameter list is kept in `signature`. The rationale is
+restated at the declaration of `cbm_elixir_scoped_qn()` in `internal/cbm/helpers.h`.
+
+**`defstruct` / `defexception` emit no node** (§5 Step 3 suggested labelling them `Class`). Neither
+introduces a name of its own — they characterise the enclosing module, which is already a Class
+node, so a `Class` for them would be a duplicate QN. `defoverridable` is likewise skipped: it marks
+existing functions rather than defining any. Their *fields* would be genuine new content, but that
+is a separate change.
+
+**Behaviour modules are labelled `Interface`.** `pass_semantic.c` keys IMPLEMENTS-vs-INHERITS off
+the base node's label, so a module declaring `@callback` is labelled `Interface` (as is
+`defprotocol`). This is what turns `@behaviour Plug` into an IMPLEMENTS edge rather than INHERITS.
+
+### 9.4 What landed where
+
+| Area | File | Change |
+|---|---|---|
+| Shared naming | `internal/cbm/helpers.{c,h}` | `cbm_elixir_scoped_qn`, `cbm_elixir_def_head`, `cbm_elixir_module_name`, `cbm_elixir_keyword_value`, `cbm_elixir_call_args`, `cbm_elixir_is_{module,func}_macro` — the def side and the call-scope side now share one implementation, so §5's "change both or neither" drift is structurally impossible |
+| Steps 1/3/4/5 | `internal/cbm/extract_defs.c` | module-qualified QNs threaded through a frame stack; guard unwrapping; full `def*` family; descent into *any* `do_block`; module attributes as Variables; `@behaviour`/`defimpl` → `base_classes` |
+| Step 1 (caller side) | `internal/cbm/extract_unified.c` | `compute_elixir_func_qn` takes the module scope; new Elixir branch in `push_boundary_scopes` pushes a SCOPE_CLASS for `defmodule` (unreachable via `class_node_types`, which is empty for Elixir) |
+| Step 2 | `internal/cbm/extract_imports.c` | `parse_elixir_imports` replaces `parse_generic_imports(ctx, "call")`; handles `alias`/`import`/`require`/`use`, `Foo.{Bar, Baz}`, and `as:` |
+| Step 2 (resolution) | `src/pipeline/pass_pkgmap.c` | full dotted path tried first as an import candidate; new `cbm_pipeline_find_dotted_module()` |
+| Step 2 (resolution) | `pass_calls.c`, `pass_usages.c`, `pass_semantic.c` | dotted-module fallback in each `build_import_map` fast path |
+| Step 6 | `internal/cbm/extract_calls.c` | bare pipe callee (`conn \|> halt`) |
+| Tests | `tests/test_extraction.c` | the 8 tests from §6, plus `call_enclosing_qn()` asserting the def-side and call-scope QNs agree |
+
+### 9.5 Verification
+
+§6 requires the full gate, not just the extraction suite, because five of the touched files are
+shared by every language. Both were run:
+
+```
+make -f Makefile.cbm test-focused TEST_SUITES=extraction   # 279 passed, 0 failed
+make -f Makefile.cbm test-par                              # 6831 passed, 1 failed, 4 skipped
+                                                           # (120 suites) — see below
+```
+
+`lang_contract` (37) and `grammar_regression` — the two §6 calls out by name — pass, as do
+`extraction_imports` (22), `extraction_inheritance` (9), `grammar_labels`, `grammar_imports`, the
+seven `grammar_probe_*` suites, `pipeline` (237), `edge_imports` (60) and `node_creation_probe`
+(80). The 8 new tests from §6 are all present and passing.
+
+**The one failure is pre-existing and unrelated.**
+`daemon_runtime_disconnect_cancels_blocked_non_index_child_and_preserves_other_session`
+(`tests/test_daemon_runtime.c:3711`, `ASSERT_TRUE(marker_published)`) asserts that a fake `git`
+shim placed on PATH writes a PID marker file within a bound before the daemon cancels the child.
+It touches no file in this change. Verified rather than assumed: a HEAD-only build in a separate
+`git worktree` fails the same test — it passed exactly once, on its very first invocation, and has
+failed every run since, in its own directory and in the repo directory, before and after clearing
+the leftover `/tmp/cbm-runtime-*` state. The modified binary behaves identically in both
+directories. It is a stateful/timing flake in this environment, not a regression.
+
+**One environment caveat.** The default test build is ASan+UBSan, and on this host
+(macOS Darwin 25.6, Intel, Apple clang 17) *any* ASan-instrumented binary — including a
+`int main(){return 0;}` probe — dies with SIGILL, and the Nix gcc that `cc` resolves to ships no
+`libasan` at all. The suites above therefore ran with `SANITIZE="-fsanitize=undefined"` under
+`/usr/bin/clang`. UBSan coverage and every functional assertion are intact; ASan's heap-error
+detection is not, and needs a re-run on a host where it works before the change is treated as
+memory-checked. Nothing about this is specific to the change — it reproduces on an unmodified tree.
+
+Cross-language spot checks beyond the suites: `psf/requests` (Python, 1,425 nodes / 6,159 edges)
+and `ninenines/cowboy` (Erlang, 4,015 / 16,196) both index cleanly. The only cross-language code
+path touched is import-target resolution, and it only fires when a definition's `name` is a dotted
+path; no Python node in `requests` carries one, so the new candidate is inert there.
+
+Not done: reconciling `scripts/clone-bench-repos.sh:56` (clones `plausible/analytics` for elixir
+while the benchmark scores `elixir-plug/plug`). §7 item 4 reads this as an Elixir-specific
+mismatch; it is not. The script and `docs/BENCHMARK.md` name different repos for **at least six**
+languages — ruby (`rails/rails` vs `sinatra/sinatra`), bash (`ohmyzsh` vs `bats-core`), zig
+(`tigerbeetle` vs `zls`), haskell (`pandoc` vs `postgrest`), erlang (`emqx` vs `cowboy`) and elixir.
+The script is a deliberately larger stress corpus, not a stale copy of the scored one. Changing it
+silently changes what a future benchmark run measures across every one of those languages, which
+belongs to whoever owns the benchmark corpus, not to this work.

@@ -157,43 +157,58 @@ static const char *compute_lisp_func_qn(CBMExtractCtx *ctx, TSNode node) {
     return cbm_fqn_compute(ctx->arena, ctx->project, ctx->rel_path, name);
 }
 
-/* Resolve an Elixir def/defp/defmacro's QN for scope tracking. The def is a
+/* Resolve an Elixir def/defp/defmacro/... QN for scope tracking. The def is a
  * `call` node whose target (first child) is the def macro and whose first
- * argument is either the function head call `name(args)` or a bare identifier
- * (zero-arg). Returns NULL for a non-def `call` (e.g. the in-body `add(x,1)`
- * call, whose target is not a def macro) so only defs push a scope. Mirrors
- * extract_elixir_func_def() in extract_defs.c. */
-static const char *compute_elixir_func_qn(CBMExtractCtx *ctx, TSNode node) {
+ * argument is either the function head call `name(args)`, a bare identifier
+ * (zero-arg), or a `when` guard wrapping the head. Returns NULL for a non-def
+ * `call` (e.g. the in-body `add(x,1)` call, whose target is not a def macro) so
+ * only defs push a scope.
+ *
+ * MUST agree byte-for-byte with extract_elixir_func_def() in extract_defs.c —
+ * this is the CALLER side of every in-body call, and a QN that no def node
+ * carries drops the CALLS edge at write. Both go through
+ * cbm_elixir_scoped_qn() / cbm_elixir_def_head() so they cannot drift. */
+static const char *compute_elixir_func_qn(CBMExtractCtx *ctx, TSNode node, const char *module_qn) {
     if (ts_node_child_count(node) == 0) {
         return NULL;
     }
     char *macro = cbm_node_text(ctx->arena, ts_node_child(node, 0), ctx->source);
-    if (!macro || (strcmp(macro, "def") != 0 && strcmp(macro, "defp") != 0 &&
-                   strcmp(macro, "defmacro") != 0)) {
+    if (!cbm_elixir_is_func_macro(macro)) {
         return NULL;
     }
-    TSNode args = ts_node_child_by_field_name(node, TS_FIELD("arguments"));
-    if (ts_node_is_null(args) && ts_node_child_count(node) > 1) {
-        args = ts_node_child(node, 1);
-    }
-    if (ts_node_is_null(args) || ts_node_child_count(args) == 0) {
+    TSNode args = cbm_elixir_call_args(node);
+    /* Named child, matching extract_elixir_func_def() exactly. */
+    if (ts_node_is_null(args) || ts_node_named_child_count(args) == 0) {
         return NULL;
     }
-    TSNode first_arg = ts_node_child(args, 0);
+    TSNode first_arg = ts_node_named_child(args, 0);
     if (ts_node_is_null(first_arg)) {
         return NULL;
     }
-    const char *fk = ts_node_type(first_arg);
+    TSNode head = cbm_elixir_def_head(first_arg, ctx->source);
+    const char *fk = ts_node_type(head);
     char *name = NULL;
-    if (strcmp(fk, "call") == 0 && ts_node_child_count(first_arg) > 0) {
-        name = cbm_node_text(ctx->arena, ts_node_child(first_arg, 0), ctx->source);
+    if (strcmp(fk, "call") == 0 && ts_node_child_count(head) > 0) {
+        name = cbm_node_text(ctx->arena, ts_node_child(head, 0), ctx->source);
     } else if (strcmp(fk, "identifier") == 0) {
-        name = cbm_node_text(ctx->arena, first_arg, ctx->source);
+        name = cbm_node_text(ctx->arena, head, ctx->source);
     }
     if (!name || !name[0]) {
         return NULL;
     }
-    return cbm_fqn_compute(ctx->arena, ctx->project, ctx->rel_path, name);
+    return cbm_elixir_scoped_qn(ctx->arena, ctx->project, ctx->rel_path, module_qn, name);
+}
+
+/* Resolve an Elixir defmodule/defprotocol/defimpl's QN for scope tracking.
+ * Mirrors emit_elixir_module_class() in extract_defs.c via the shared
+ * cbm_elixir_module_name(). */
+static const char *compute_elixir_module_qn(CBMExtractCtx *ctx, TSNode node,
+                                            const char *parent_qn) {
+    const char *name = cbm_elixir_module_name(ctx->arena, node, ctx->source);
+    if (!name) {
+        return NULL;
+    }
+    return cbm_elixir_scoped_qn(ctx->arena, ctx->project, ctx->rel_path, parent_qn, name);
 }
 
 /* Resolve a CFML tag-function's QN for scope tracking. A <cffunction name="foo">
@@ -530,9 +545,10 @@ static const char *compute_func_qn(CBMExtractCtx *ctx, TSNode node, const CBMLan
     }
 
     /* Elixir: def/defp/defmacro are `call` nodes (so is every in-body call).
-     * Gate on the def-macro target text so only definitions push a scope. */
+     * Gate on the def-macro target text so only definitions push a scope. The
+     * enclosing defmodule arrives as a SCOPE_CLASS pushed below. */
     if (ctx->language == CBM_LANG_ELIXIR) {
-        return compute_elixir_func_qn(ctx, node);
+        return compute_elixir_func_qn(ctx, node, state->enclosing_class_qn);
     }
 
     /* Objective-C: a method_definition's selector keyword is a plain `identifier`
@@ -1452,6 +1468,16 @@ static void push_boundary_scopes(CBMExtractCtx *ctx, TSNode node, const CBMLangS
                             }
                         }
                     }
+                }
+            } else if (ctx->language == CBM_LANG_ELIXIR) {
+                /* Elixir has no class_node_types: `defmodule` is a `call`, which
+                 * function_node_types already claimed, so the class branch below
+                 * is unreachable for it. Push the module scope here instead —
+                 * without it every def QN drops its module and collides with
+                 * every same-named def in the project. */
+                const char *mqn = compute_elixir_module_qn(ctx, node, state->enclosing_class_qn);
+                if (mqn) {
+                    push_scope(state, SCOPE_CLASS, depth, mqn);
                 }
             }
         }

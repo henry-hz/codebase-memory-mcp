@@ -1104,6 +1104,115 @@ static void parse_zig_imports(CBMExtractCtx *ctx) {
     }
 }
 
+// --- Elixir imports ---
+// `alias` / `import` / `require` / `use` are `call` nodes, and in real Elixir
+// every one of them lives inside a `defmodule ... do` block — never at the root.
+// parse_generic_imports scans only the DIRECT children of the root, so it saw
+// none of them; what it DID see was the top-level `defmodule Foo do ... end`
+// call itself, and it recorded that as an import. On elixir-plug/plug that was
+// the whole of the Elixir import graph: 41 IMPORTS edges, 28 of them pointing at
+// the module the importing file itself declares. Walk the tree instead.
+
+// The last dot-separated segment of a dotted module name ("Plug.Conn" → "Conn").
+// This is the name the alias binds locally, which the resolver's import map
+// keys on.
+static const char *elixir_last_segment(const char *dotted) {
+    const char *dot = strrchr(dotted, '.');
+    return dot ? dot + SKIP_ONE : dotted;
+}
+
+static void elixir_push_import(CBMExtractCtx *ctx, const char *module_path,
+                               const char *local_name) {
+    if (!module_path || !module_path[0]) {
+        return;
+    }
+    CBMImport imp = {.local_name = local_name && local_name[0] ? local_name
+                                                               : elixir_last_segment(module_path),
+                     .module_path = module_path};
+    cbm_imports_push(&ctx->result->imports, ctx->arena, imp);
+}
+
+// `alias Plug.{Adapters, Utils}` — a `dot` whose right operand is a tuple of
+// aliases — expands to one alias per tuple element. Returns false when `node`
+// is not that shape.
+static bool elixir_multi_alias(CBMExtractCtx *ctx, TSNode node) {
+    CBMArena *a = ctx->arena;
+    if (strcmp(ts_node_type(node), "dot") != 0) {
+        return false;
+    }
+    TSNode left = ts_node_child_by_field_name(node, TS_FIELD("left"));
+    TSNode right = ts_node_child_by_field_name(node, TS_FIELD("right"));
+    if (ts_node_is_null(left) || ts_node_is_null(right) ||
+        strcmp(ts_node_type(right), "tuple") != 0) {
+        return false;
+    }
+    char *prefix = cbm_node_text(a, left, ctx->source);
+    if (!prefix || !prefix[0]) {
+        return false;
+    }
+    for (uint32_t i = 0; i < ts_node_named_child_count(right); i++) {
+        TSNode elem = ts_node_named_child(right, i);
+        if (strcmp(ts_node_type(elem), "alias") != 0) {
+            continue;
+        }
+        char *suffix = cbm_node_text(a, elem, ctx->source);
+        if (suffix && suffix[0]) {
+            elixir_push_import(ctx, cbm_arena_sprintf(a, "%s.%s", prefix, suffix), suffix);
+        }
+    }
+    return true;
+}
+
+static void elixir_process_import_call(CBMExtractCtx *ctx, TSNode node) {
+    CBMArena *a = ctx->arena;
+    if (ts_node_child_count(node) == 0) {
+        return;
+    }
+    TSNode target = ts_node_child(node, 0);
+    if (ts_node_is_null(target) || strcmp(ts_node_type(target), "identifier") != 0) {
+        return;
+    }
+    char *macro = cbm_node_text(a, target, ctx->source);
+    if (!macro || (strcmp(macro, "alias") != 0 && strcmp(macro, "import") != 0 &&
+                   strcmp(macro, "require") != 0 && strcmp(macro, "use") != 0)) {
+        return;
+    }
+    TSNode args = cbm_elixir_call_args(node);
+    if (ts_node_is_null(args) || ts_node_named_child_count(args) == 0) {
+        return;
+    }
+    TSNode first = ts_node_named_child(args, 0);
+    if (elixir_multi_alias(ctx, first)) {
+        return;
+    }
+    /* `__MODULE__`-relative and computed aliases resolve to nothing useful. */
+    const char *fk = ts_node_type(first);
+    if (strcmp(fk, "alias") != 0 && strcmp(fk, "dot") != 0) {
+        return;
+    }
+    char *module_path = cbm_node_text(a, first, ctx->source);
+    /* `alias Plug.Conn.Query, as: Q` binds Q, not Query. */
+    const char *local = NULL;
+    TSNode as = cbm_elixir_keyword_value(args, ctx->source, "as");
+    if (!ts_node_is_null(as)) {
+        local = cbm_node_text(a, as, ctx->source);
+    }
+    elixir_push_import(ctx, module_path, local);
+}
+
+static void parse_elixir_imports(CBMExtractCtx *ctx) {
+    TSNodeStack stack;
+    ts_nstack_init(&stack, ctx->arena, CBM_SZ_512);
+    ts_nstack_push(&stack, ctx->arena, ctx->root);
+    while (stack.count > 0) {
+        TSNode node = ts_nstack_pop(&stack);
+        if (strcmp(ts_node_type(node), "call") == 0) {
+            elixir_process_import_call(ctx, node);
+        }
+        ts_nstack_push_children(&stack, ctx->arena, node);
+    }
+}
+
 // --- Wolfram imports ---
 // get_top: << "package" (Get["file"])
 // apply where first child is builtin_symbol "Needs" with string arg
@@ -2790,8 +2899,8 @@ void cbm_extract_imports(CBMExtractCtx *ctx) {
         parse_r_imports(ctx);
         break;
     case CBM_LANG_ELIXIR:
-        // Elixir: import/use/alias/require are call nodes
-        parse_generic_imports(ctx, "call");
+        // alias/import/require/use are call nodes nested in a defmodule body.
+        parse_elixir_imports(ctx);
         break;
     case CBM_LANG_BASH:
         // source/. commands

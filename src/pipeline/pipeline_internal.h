@@ -173,6 +173,15 @@ const cbm_gbuf_node_t *cbm_pipeline_resolve_import_node(const cbm_pipeline_ctx_t
                                                         const CBMImport *imp,
                                                         CBMHashTable *namespace_map);
 
+/* Resolve an import whose module_path is a dotted module NAME rather than a
+ * file path — `alias Plug.Conn` names the node whose `name` IS "Plug.Conn",
+ * which no path-derived QN can express. Returns the unique import-targetable
+ * node carrying that exact name (lexicographically smallest QN when several
+ * do, for run-to-run determinism), or NULL. A language whose definitions carry
+ * simple names never hits, so callers can use it as a pure fallback. */
+const cbm_gbuf_node_t *cbm_pipeline_find_dotted_module(const cbm_gbuf_t *gbuf,
+                                                       const char *module_path);
+
 /* Build a namespace → File-node-QN map from a set of extraction results.
  * Each result that declared a namespace/package contributes one entry keyed by
  * the namespace string (e.g. "App.Utils", "com.example").  Returns NULL when no
