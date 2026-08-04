@@ -9,18 +9,23 @@
 - **Platform**: Apple M3 Pro, macOS Darwin 25.3.0
 - **Date**: 2026-03-01 (Elixir re-measured 2026-08-04 — see that section)
 
-> **Known scoring discrepancy in the 2026-03-01 run.** Every per-language table
-> below that contains a PARTIAL disagrees with its own **Score** line by exactly
-> 0.5 per PARTIAL: the numerator recorded is `#PASS − 0.5 × #PARTIAL`, not the
-> `#PASS + 0.5 × #PARTIAL` the rubric above specifies. Verified against Python,
-> JavaScript, Erlang, Elixir, OCaml, Haskell, Scala, Ruby and Swift; rows with no
-> PARTIAL (Lua, Perl, Bash, …) tally correctly. Under the stated rubric those nine
-> rows would each score 1.0 higher per PARTIAL — e.g. Python 11.5/12 rather than
-> 10.5/12. Swift additionally shows a denominator of 11 with no N/A question.
-> Correcting this means re-deriving every affected row together, which is a
-> separate change; the rows are left as originally recorded so they stay mutually
-> comparable. The Elixir row re-measured on 2026-08-04 has no PARTIAL, so its
-> 12/12 is identical under either reading.
+> **Known scoring discrepancy in the 2026-03-01 run.** Every table below still
+> carrying its original 2026-03-01 score that contains a PARTIAL disagrees with
+> its own **Score** line by exactly 1.0 per PARTIAL: the numerator recorded is
+> `#PASS − 0.5 × #PARTIAL`, not the `#PASS + 0.5 × #PARTIAL` the rubric above
+> specifies (each PARTIAL was subtracted rather than added). Verified against
+> Python, JavaScript, Erlang, Elixir, OCaml, Haskell, Scala, Ruby and Swift; rows
+> with no PARTIAL (Lua, Perl, Bash, …) tally correctly. Under the stated rubric
+> those rows would each score 1.0 higher per PARTIAL — e.g. Python 11.5/12 rather
+> than 10.5/12. Swift additionally shows a denominator of 11 with no N/A
+> question. Two later re-measurements follow their own conventions and are
+> exempt: the PHP table (post-LSP refresh) records 10/12 with 2 PARTIALs (they
+> count as 0 there; 11/12 under the rubric), and the Linux-kernel stress table
+> records 11/11 with 1 PARTIAL (counted as a full PASS; 10.5/11 under the
+> rubric). Correcting all of this means re-deriving every affected row together,
+> which is a separate change; the rows are left as originally recorded so they
+> stay mutually comparable. The Elixir row re-measured on 2026-08-04 has no
+> PARTIAL, so its 12/12 is identical under either reading.
 
 ### The 12 Questions
 

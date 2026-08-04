@@ -136,6 +136,31 @@ void cbm_extract_usages(CBMExtractCtx *ctx) {
 
 void handle_usages(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec *spec, WalkState *state) {
     (void)spec;
+
+    /* Elixir module-attribute READ: `@timeout` is unary_operator(@, identifier).
+     * The definition form's operand is a `call` (`@timeout 5_000`), so it never
+     * matches here. This branch runs BEFORE the inside_call skip on purpose:
+     * every Elixir statement nests inside some `call` node (def/defmodule are
+     * calls), so the generic path can never see an attribute read. The emitted
+     * name keeps the `@` — that is the Variable node's name. */
+    if (ctx->language == CBM_LANG_ELIXIR && strcmp(ts_node_type(node), "unary_operator") == 0) {
+        TSNode op = ts_node_child_by_field_name(node, TS_FIELD("operator"));
+        TSNode operand = ts_node_child_by_field_name(node, TS_FIELD("operand"));
+        if (!ts_node_is_null(op) && !ts_node_is_null(operand) &&
+            ts_node_end_byte(op) - ts_node_start_byte(op) == 1 &&
+            ctx->source[ts_node_start_byte(op)] == '@' &&
+            strcmp(ts_node_type(operand), "identifier") == 0) {
+            char *aname = cbm_node_text(ctx->arena, operand, ctx->source);
+            if (aname && aname[0]) {
+                CBMUsage usage;
+                usage.ref_name = cbm_arena_sprintf(ctx->arena, "@%s", aname);
+                usage.enclosing_func_qn = state->enclosing_func_qn;
+                cbm_usages_push(&ctx->result->usages, ctx->arena, usage);
+            }
+        }
+        return;
+    }
+
     if (!is_reference_node(node, ctx->language)) {
         return;
     }

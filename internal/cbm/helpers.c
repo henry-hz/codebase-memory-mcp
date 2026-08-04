@@ -1048,6 +1048,47 @@ TSNode cbm_elixir_def_head(TSNode arg, const char *source) {
     return ts_node_is_null(left) ? arg : left;
 }
 
+const char *cbm_elixir_def_name(CBMArena *a, TSNode head, const char *source, TSNode *out_params) {
+    TSNode null_node = {0};
+    if (out_params) {
+        *out_params = null_node;
+    }
+    if (ts_node_is_null(head)) {
+        return NULL;
+    }
+    const char *fk = ts_node_type(head);
+    if (strcmp(fk, "call") == 0 && ts_node_child_count(head) > 0) {
+        TSNode target = ts_node_child(head, 0);
+        /* `def unquote(name)(x)` — the target is itself a call; the name only
+         * exists at expansion time, and a literal "unquote(name)" node is
+         * garbage no callee can ever link to. Emit nothing. */
+        if (ts_node_is_null(target) || strcmp(ts_node_type(target), "identifier") != 0) {
+            return NULL;
+        }
+        if (out_params) {
+            /* The grammar attaches no field name to a call's arguments node —
+             * cbm_elixir_call_args's second-child fallback is what finds it. */
+            *out_params = cbm_elixir_call_args(head);
+        }
+        return cbm_node_text(a, target, source);
+    }
+    if (strcmp(fk, "identifier") == 0) {
+        return cbm_node_text(a, head, source);
+    }
+    /* Operator definition: `def a <> b` / `def -a`. The function IS the
+     * operator, so name it by the operator token (call sites are operator
+     * applications, which the callee extractor never links — the node exists
+     * for search/architecture completeness, not the call graph). A `when`
+     * binary_operator never reaches here: cbm_elixir_def_head unwraps it. */
+    if (strcmp(fk, "binary_operator") == 0 || strcmp(fk, "unary_operator") == 0) {
+        TSNode op = ts_node_child_by_field_name(head, TS_FIELD("operator"));
+        if (!ts_node_is_null(op)) {
+            return cbm_node_text(a, op, source);
+        }
+    }
+    return NULL;
+}
+
 bool cbm_elixir_is_module_macro(const char *macro) {
     if (!macro) {
         return false;
@@ -1111,7 +1152,8 @@ TSNode cbm_elixir_keyword_value(TSNode args, const char *source, const char *key
     return null_node;
 }
 
-const char *cbm_elixir_module_name(CBMArena *a, TSNode call_node, const char *source) {
+const char *cbm_elixir_module_name(CBMArena *a, TSNode call_node, const char *source,
+                                   const char *parent_qn) {
     if (ts_node_child_count(call_node) == 0) {
         return NULL;
     }
@@ -1128,6 +1170,14 @@ const char *cbm_elixir_module_name(CBMArena *a, TSNode call_node, const char *so
     if (ts_node_is_null(name_node)) {
         return NULL;
     }
+    /* Only stable name shapes: `alias` (Plug.Conn — one token), `dot`
+     * (__MODULE__.Sub), `atom` (:erl_style). A `call` here is a dynamic name
+     * (`defmodule Module.concat(A, B)`) whose text would poison the QN space
+     * with parens and commas — emit nothing for it. */
+    const char *nk = ts_node_type(name_node);
+    if (strcmp(nk, "alias") != 0 && strcmp(nk, "dot") != 0 && strcmp(nk, "atom") != 0) {
+        return NULL;
+    }
     char *name = cbm_node_text(a, name_node, source);
     if (!name || !name[0]) {
         return NULL;
@@ -1136,9 +1186,32 @@ const char *cbm_elixir_module_name(CBMArena *a, TSNode call_node, const char *so
     if (strcmp(macro, "defimpl") == 0) {
         TSNode target = cbm_elixir_keyword_value(args, source, "for");
         if (!ts_node_is_null(target)) {
+            /* `for: [Tuple, Map]` / `for: {A, B}` — the compiler generates one
+             * module per element, but one shared body can only carry one scope:
+             * name it after the FIRST element. The def side emits additional
+             * Class nodes for the remaining elements. */
+            const char *tk = ts_node_type(target);
+            if (strcmp(tk, "list") == 0 || strcmp(tk, "tuple") == 0) {
+                if (ts_node_named_child_count(target) == 0) {
+                    return name;
+                }
+                target = ts_node_named_child(target, 0);
+            }
             char *tname = cbm_node_text(a, target, source);
             if (tname && tname[0]) {
                 return cbm_arena_sprintf(a, "%s.%s", name, tname);
+            }
+            return name;
+        }
+        /* `defimpl Proto do` without `for:` nested in a defmodule targets the
+         * enclosing module — the compiled name is Proto.<Enclosing>. Without
+         * this the impl is named identically to the protocol, the base edge
+         * self-resolves, and the IMPLEMENTS edge is suppressed as a self-edge. */
+        if (parent_qn && parent_qn[0]) {
+            const char *seg = strrchr(parent_qn, '.');
+            seg = seg ? seg + SKIP_ONE : parent_qn;
+            if (seg[0]) {
+                return cbm_arena_sprintf(a, "%s.%s", name, seg);
             }
         }
     }

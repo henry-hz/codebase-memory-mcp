@@ -4679,6 +4679,7 @@ static bool elixir_attr_is_metadata(const char *name) {
                                  "callback",
                                  "macrocallback",
                                  "optional_callbacks",
+                                 "fallback_to_any",
                                  "behaviour",
                                  "behavior",
                                  "impl",
@@ -4790,6 +4791,40 @@ static void emit_elixir_module_attr_vars(CBMExtractCtx *ctx, TSNode do_block,
     }
 }
 
+/* Merge one clause's arity into an "arities" string kept sorted ascending
+ * ("0", "1,3", ...). Arities above the bitmask range are ignored — no real
+ * function head carries 32+ parameters. */
+static const char *elixir_merge_arities(CBMArena *a, const char *existing, int arity) {
+    enum { MAX_ARITY_BITS = 32 };
+    uint32_t mask = 0;
+    if (existing) {
+        for (const char *p = existing; *p;) {
+            int v = 0;
+            while (*p >= '0' && *p <= '9') {
+                v = v * 10 + (*p++ - '0');
+            }
+            if (v < MAX_ARITY_BITS) {
+                mask |= 1u << v;
+            }
+            while (*p && (*p < '0' || *p > '9')) {
+                p++;
+            }
+        }
+    }
+    if (arity >= 0 && arity < MAX_ARITY_BITS) {
+        mask |= 1u << arity;
+    }
+    char buf[CBM_SZ_256];
+    size_t w = 0;
+    for (int v = 0; v < MAX_ARITY_BITS && w + 4 < sizeof(buf); v++) {
+        if (mask & (1u << v)) {
+            w += (size_t)snprintf(buf + w, sizeof(buf) - w, "%s%d", w ? "," : "", v);
+        }
+    }
+    buf[w] = '\0';
+    return cbm_arena_sprintf(a, "%s", buf);
+}
+
 // Handle Elixir def/defp/defmacro/defmacrop/defguard/defguardp/defdelegate.
 // `module_qn` is the enclosing defmodule's QN, or NULL at file scope.
 static void extract_elixir_func_def(CBMExtractCtx *ctx, TSNode node, const char *macro,
@@ -4808,33 +4843,58 @@ static void extract_elixir_func_def(CBMExtractCtx *ctx, TSNode node, const char 
     // `def foo(a) when is_x(a)` puts the head under a `when` binary_operator.
     TSNode head = cbm_elixir_def_head(first_arg, ctx->source);
 
-    const char *fk = ts_node_type(head);
-    char *name = NULL;
     TSNode params = {0};
-    if (strcmp(fk, "call") == 0 && ts_node_child_count(head) > 0) {
-        name = cbm_node_text(a, ts_node_child(head, 0), ctx->source);
-        params = ts_node_child_by_field_name(head, TS_FIELD("arguments"));
-    } else if (strcmp(fk, "identifier") == 0) {
-        name = cbm_node_text(a, head, ctx->source);
-    }
+    const char *name = cbm_elixir_def_name(a, head, ctx->source, &params);
     if (!name || !name[0]) {
         return;
+    }
+    const char *hk = ts_node_type(head);
+    int arity = 0;
+    if (!ts_node_is_null(params)) {
+        arity = (int)ts_node_named_child_count(params);
+    } else if (strcmp(hk, "binary_operator") == 0) {
+        arity = 2; // operator definition `def a <> b`
+    } else if (strcmp(hk, "unary_operator") == 0) {
+        arity = 1; // operator definition `def -a`
+    }
+
+    const char *qn = cbm_elixir_scoped_qn(a, ctx->project, ctx->rel_path, module_qn, name);
+    uint32_t start = ts_node_start_point(node).row + TS_LINE_OFFSET;
+    uint32_t end = ts_node_end_point(node).row + TS_LINE_OFFSET;
+
+    /* All clauses and all arities of one name in one module are ONE function.
+     * Merging here (rather than letting the graph upsert pick a survivor) keeps
+     * the FIRST head's signature, spans first-clause-start .. last-clause-end so
+     * get_code_snippet returns every clause, and accumulates the arity set. The
+     * defs array holds one entry per unique QN, so this scan stays short even on
+     * clause-heavy files (Plug.Conn.Status: hundreds of clauses, one QN). */
+    for (int i = ctx->result->defs.count - 1; i >= 0; i--) {
+        CBMDefinition *prev = &ctx->result->defs.items[i];
+        if (prev->label && strcmp(prev->label, "Function") == 0 && prev->qualified_name &&
+            strcmp(prev->qualified_name, qn) == 0) {
+            if (end > prev->end_line) {
+                prev->end_line = end;
+            }
+            prev->arities = elixir_merge_arities(a, prev->arities, arity);
+            return;
+        }
     }
 
     CBMDefinition def;
     memset(&def, 0, sizeof(def));
     def.name = name;
-    def.qualified_name = cbm_elixir_scoped_qn(a, ctx->project, ctx->rel_path, module_qn, name);
+    def.qualified_name = qn;
     def.label = "Function";
     def.file_path = ctx->rel_path;
     def.parent_class = module_qn;
-    def.start_line = ts_node_start_point(node).row + TS_LINE_OFFSET;
-    def.end_line = ts_node_end_point(node).row + TS_LINE_OFFSET;
+    def.start_line = start;
+    def.end_line = end;
     def.is_exported = (strcmp(macro, "defp") != 0 && strcmp(macro, "defmacrop") != 0 &&
                        strcmp(macro, "defguardp") != 0);
     if (!ts_node_is_null(params)) {
         def.signature = cbm_node_text(a, params, ctx->source);
     }
+    def.arities = elixir_merge_arities(a, NULL, arity);
     cbm_defs_push(&ctx->result->defs, a, def);
 }
 
@@ -4846,14 +4906,17 @@ static void extract_elixir_func_def(CBMExtractCtx *ctx, TSNode node, const char 
 static const char *emit_elixir_module_class(CBMExtractCtx *ctx, TSNode cur, const char *macro,
                                             const char *parent_qn, TSNode *out_do_block) {
     CBMArena *a = ctx->arena;
-    TSNode null_node = {0};
-    *out_do_block = null_node;
-    const char *name = cbm_elixir_module_name(a, cur, ctx->source);
+    /* The body is handed back even when the module has no stable name
+     * (`defmodule Module.concat(A, B)`): the walk still descends with the
+     * OUTER scope, exactly as the call-scope walker does when
+     * compute_elixir_module_qn returns NULL — dropping the subtree here would
+     * emit no defs for QNs the caller side still names. */
+    TSNode do_block = cbm_find_child_by_kind(cur, "do_block");
+    *out_do_block = do_block;
+    const char *name = cbm_elixir_module_name(a, cur, ctx->source, parent_qn);
     if (!name) {
         return NULL;
     }
-    TSNode do_block = cbm_find_child_by_kind(cur, "do_block");
-    *out_do_block = do_block;
 
     CBMDefinition def;
     memset(&def, 0, sizeof(def));
@@ -4868,6 +4931,41 @@ static const char *emit_elixir_module_class(CBMExtractCtx *ctx, TSNode cur, cons
             bases[0] = cbm_node_text(a, ts_node_named_child(args, 0), ctx->source);
             bases[1] = NULL;
             def.base_classes = bases;
+        }
+        /* `for: [Tuple, Map]` generates one module per element. The shared body
+         * is scoped under the FIRST element (that's what cbm_elixir_module_name
+         * returned); the remaining elements still get their own Class node and
+         * IMPLEMENTS edge so protocol-coverage queries see every type. */
+        TSNode fv = cbm_elixir_keyword_value(args, ctx->source, "for");
+        if (!ts_node_is_null(fv) && def.base_classes) {
+            const char *fvk = ts_node_type(fv);
+            if (strcmp(fvk, "list") == 0 || strcmp(fvk, "tuple") == 0) {
+                for (uint32_t ei = 1; ei < ts_node_named_child_count(fv); ei++) {
+                    char *ename = cbm_node_text(a, ts_node_named_child(fv, ei), ctx->source);
+                    if (!ename || !ename[0]) {
+                        continue;
+                    }
+                    const char **ebases = (const char **)cbm_arena_alloc(a, sizeof(char *) * 2);
+                    if (!ebases) {
+                        break;
+                    }
+                    ebases[0] = def.base_classes[0];
+                    ebases[1] = NULL;
+                    CBMDefinition extra;
+                    memset(&extra, 0, sizeof(extra));
+                    extra.label = "Class";
+                    extra.name = cbm_arena_sprintf(a, "%s.%s", def.base_classes[0], ename);
+                    extra.qualified_name =
+                        cbm_elixir_scoped_qn(a, ctx->project, ctx->rel_path, parent_qn, extra.name);
+                    extra.file_path = ctx->rel_path;
+                    extra.parent_class = parent_qn;
+                    extra.base_classes = ebases;
+                    extra.start_line = ts_node_start_point(cur).row + TS_LINE_OFFSET;
+                    extra.end_line = ts_node_end_point(cur).row + TS_LINE_OFFSET;
+                    extra.is_exported = true;
+                    cbm_defs_push(&ctx->result->defs, a, extra);
+                }
+            }
         }
     } else if (strcmp(macro, "defprotocol") == 0) {
         /* A protocol IS the interface; pass_semantic keys IMPLEMENTS off the
@@ -4923,6 +5021,48 @@ static void elixir_stack_push(elixir_stack_t *s, CBMArena *a, TSNode node, const
     s->count++;
 }
 
+/* Statement containers with no name of their own, verified against the vendored
+ * grammar: do_block children may be `else_block` (if/unless), `rescue_block`/
+ * `catch_block`/`after_block` (try), or `stab_clause` (case/cond arms); a
+ * rescue/catch block's children are stab_clauses; a stab_clause's statements
+ * live under its `body` child. All of them can hold defs in real code
+ * (version-gated if/else defs, defs in case arms). */
+static bool elixir_is_transparent_block(const char *kind) {
+    return strcmp(kind, "else_block") == 0 || strcmp(kind, "rescue_block") == 0 ||
+           strcmp(kind, "catch_block") == 0 || strcmp(kind, "after_block") == 0 ||
+           strcmp(kind, "stab_clause") == 0 || strcmp(kind, "body") == 0;
+}
+
+/* Push `parent`'s statement children (calls and transparent containers) in one
+ * cursor pass, then reverse the pushed segment so they pop in source order —
+ * ts_node_child(n, i) is O(i) in tree-sitter, and this runs for EVERY call with
+ * a body (`test "..." do` blocks included). Same reasoning as
+ * ts_nstack_push_children(). A stab_clause's pattern side (kind `arguments`)
+ * matches neither filter, so case patterns are never mistaken for statements. */
+static void elixir_push_block_children(elixir_stack_t *s, CBMArena *a, TSNode parent,
+                                       const char *module_qn) {
+    int base = s->count;
+    TSTreeCursor cursor = ts_tree_cursor_new(parent);
+    if (ts_tree_cursor_goto_first_child(&cursor)) {
+        do {
+            TSNode child = ts_tree_cursor_current_node(&cursor);
+            if (ts_node_is_null(child)) {
+                continue;
+            }
+            const char *ck = ts_node_type(child);
+            if (strcmp(ck, "call") == 0 || elixir_is_transparent_block(ck)) {
+                elixir_stack_push(s, a, child, module_qn);
+            }
+        } while (ts_tree_cursor_goto_next_sibling(&cursor));
+    }
+    ts_tree_cursor_delete(&cursor);
+    for (int lo = base, hi = s->count - 1; lo < hi; lo++, hi--) {
+        elixir_frame_t tmp = s->items[lo];
+        s->items[lo] = s->items[hi];
+        s->items[hi] = tmp;
+    }
+}
+
 // Process Elixir call nodes iteratively — handles the def* family and the
 // module containers without recursion (Elixir metaprogramming nests deeply;
 // see tests/test_stack_overflow.c for why recursion here is not an option).
@@ -4940,6 +5080,18 @@ static void extract_elixir_call(CBMExtractCtx *ctx, TSNode node, const CBMLangSp
         if (ts_node_child_count(cur) == 0) {
             continue;
         }
+
+        /* A transparent container carries no name of its own but holds
+         * statements: the `else` branch of `if/unless`, `rescue`/`catch`/
+         * `after` sections, `case`/`cond` arms (stab_clause → body). Without
+         * descending, every def in an else branch or a case arm vanishes while
+         * the call-scope walker still names it — the exact phantom-QN drop the
+         * QN lockstep exists to prevent. */
+        if (elixir_is_transparent_block(ts_node_type(cur))) {
+            elixir_push_block_children(&stack, a, cur, module_qn);
+            continue;
+        }
+
         TSNode callee = ts_node_child(cur, 0);
         if (ts_node_is_null(callee)) {
             continue;
@@ -4968,24 +5120,35 @@ static void extract_elixir_call(CBMExtractCtx *ctx, TSNode node, const CBMLangSp
          * and most of Phoenix define functions), inside `if`/`unless`/`for`, and in
          * nested `defmodule`s. A non-def call with a body costs one pop and emits
          * nothing, so the uniform rule is cheaper than enumerating containers. */
-        if (ts_node_is_null(do_block)) {
+        if (!ts_node_is_null(do_block)) {
+            elixir_push_block_children(&stack, a, do_block, body_module_qn);
             continue;
         }
-        /* One cursor pass, then reverse the pushed segment so children pop in
-         * source order — ts_node_child(n, i) is O(i), and this loop now runs for
-         * EVERY call with a body (`test "..." do` blocks included), not just a
-         * defmodule's. Same reasoning as ts_nstack_push_children(). */
-        int base = stack.count;
-        TSTreeCursor cursor = ts_tree_cursor_new(do_block);
-        if (ts_tree_cursor_goto_first_child(&cursor)) {
-            do {
-                TSNode dchild = ts_tree_cursor_current_node(&cursor);
-                if (!ts_node_is_null(dchild) && strcmp(ts_node_type(dchild), "call") == 0) {
-                    elixir_stack_push(&stack, a, dchild, body_module_qn);
-                }
-            } while (ts_tree_cursor_goto_next_sibling(&cursor));
+        /* Keyword-form body: `defmodule KW, do: def(...)`, `if x, do: def(...)`,
+         * `quote do: def(...)`. The body is the value of the `do:` pair inside
+         * the arguments' keyword list — a call node the do_block descent above
+         * never sees. */
+        TSNode kwargs = cbm_elixir_call_args(cur);
+        if (ts_node_is_null(kwargs)) {
+            continue;
         }
-        ts_tree_cursor_delete(&cursor);
+        int base = stack.count;
+        for (uint32_t ki = 0; ki < ts_node_named_child_count(kwargs); ki++) {
+            TSNode kws = ts_node_named_child(kwargs, ki);
+            if (strcmp(ts_node_type(kws), "keywords") != 0) {
+                continue;
+            }
+            for (uint32_t pi = 0; pi < ts_node_named_child_count(kws); pi++) {
+                TSNode pair = ts_node_named_child(kws, pi);
+                if (strcmp(ts_node_type(pair), "pair") != 0) {
+                    continue;
+                }
+                TSNode val = ts_node_child_by_field_name(pair, TS_FIELD("value"));
+                if (!ts_node_is_null(val) && strcmp(ts_node_type(val), "call") == 0) {
+                    elixir_stack_push(&stack, a, val, body_module_qn);
+                }
+            }
+        }
         for (int lo = base, hi = stack.count - 1; lo < hi; lo++, hi--) {
             elixir_frame_t tmp = stack.items[lo];
             stack.items[lo] = stack.items[hi];

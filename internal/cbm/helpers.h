@@ -128,6 +128,15 @@ const char *cbm_elixir_scoped_qn(CBMArena *a, const char *project, const char *r
 // them in elixir-plug/plug, including Plug.Conn.get_req_header — is dropped.
 TSNode cbm_elixir_def_head(TSNode arg, const char *source);
 
+// The NAME an (already def_head-unwrapped) Elixir def head declares, or NULL
+// when the head is dynamic (`def unquote(name)(x)`) and no stable name exists.
+// Handles `name(args)` call heads, bare zero-arg identifiers, and operator
+// definitions (`def a <> b` → "<>", `def -a` → "-"). *out_params receives the
+// head call's arguments node (null for identifier/operator heads). Called by
+// BOTH extract_defs.c (def side) and extract_unified.c (call-scope side) so the
+// two cannot disagree on what a head is named.
+const char *cbm_elixir_def_name(CBMArena *a, TSNode head, const char *source, TSNode *out_params);
+
 // True for an Elixir `call` node that defines a module-like container
 // (defmodule / defprotocol / defimpl), given its macro name.
 bool cbm_elixir_is_module_macro(const char *macro);
@@ -146,9 +155,16 @@ TSNode cbm_elixir_keyword_value(TSNode args, const char *source, const char *key
 
 // The module NAME an Elixir container macro introduces: `defmodule Plug.Conn` →
 // "Plug.Conn", `defimpl Enumerable, for: List` → "Enumerable.List" (the module
-// the compiler actually generates). NULL when `call_node` is not a module
-// container. Shared so the def side and the call-scope side name it identically.
-const char *cbm_elixir_module_name(CBMArena *a, TSNode call_node, const char *source);
+// the compiler actually generates). A nested `defimpl Proto do` without `for:`
+// targets the enclosing module, so `parent_qn`'s last segment supplies the type
+// (`Proto.<Enclosing>`); a `for: [A, B]` list/tuple names the FIRST element
+// (extra Class nodes for the rest are emitted by the def side only — one scope
+// must serve the single shared body). NULL when `call_node` is not a module
+// container or its name is dynamic (`defmodule Module.concat(A, B)`) — only
+// alias / dot / atom name nodes produce stable module names. Shared so the def
+// side and the call-scope side name it identically.
+const char *cbm_elixir_module_name(CBMArena *a, TSNode call_node, const char *source,
+                                   const char *parent_qn);
 
 // Resolve a function/method definition node's NAME node across all ~130 grammars
 // (generic `name` field, arrow→declarator, C/C++ declarator chain, plus the many

@@ -494,6 +494,7 @@ static void build_def_props(char *buf, size_t bufsize, const CBMDefinition *def)
     size_t pos = (size_t)n;
     append_json_string(buf, bufsize, &pos, "docstring", def->docstring);
     append_json_string(buf, bufsize, &pos, "signature", def->signature);
+    append_json_string(buf, bufsize, &pos, "arities", def->arities);
     append_json_string(buf, bufsize, &pos, "return_type", def->return_type);
     append_json_string(buf, bufsize, &pos, "parent_class", def->parent_class);
     append_json_str_array(buf, bufsize, &pos, "decorators", def->decorators);
@@ -2308,6 +2309,19 @@ static void resolve_file_calls(resolve_ctx_t *rc, resolve_worker_state_t *ws, CB
         atomic_fetch_add_explicit(&rc->time_ns_rc_hint, extract_now_ns() - _rc_t0,
                                   memory_order_relaxed);
 
+        /* Elixir scope-local upgrade, mirroring the sequential pass
+         * (pass_calls.c): module-qualified definitions sit one level below the
+         * file-module QN the registry probes, so bare in-module calls resolve
+         * weakly (or cross-wire). Re-derive the module from the CALLER's QN and
+         * take the exact hit. After the field-type hint so the final weak-vs-
+         * exact state is what gets upgraded; outside the registry because its
+         * per-file resolve cache keys on callee_name alone while this depends
+         * on the per-call enclosing scope. */
+        if (lang == CBM_LANG_ELIXIR) {
+            cbm_registry_scope_local_override(rc->registry, call->callee_name,
+                                              call->enclosing_func_qn, &res);
+        }
+
         /* Perl call-graph noise guard (#476), mirroring the sequential pass
          * (pass_calls.c). Perl has no LSP resolver; for builtins (push/shift/
          * keys/...) and method calls ($obj->m, unresolved receiver), suppress
@@ -2318,6 +2332,15 @@ static void resolve_file_calls(resolve_ctx_t *rc, resolve_worker_state_t *ws, CB
          * Gated to Perl — other languages are unaffected. */
         if (cbm_perl_suppress_generic_match(lang == CBM_LANG_PERL, call->is_method,
                                             call->callee_name, res.strategy)) {
+            continue;
+        }
+
+        /* Elixir stdlib noise guard, mirroring the sequential pass: a weak
+         * short-name match binding `Enum.map` / `Keyword.get` / `:ets.new` to a
+         * project symbol that shares the simple name is a false edge. Exact and
+         * import-aware strategies pass through. Gated to Elixir. */
+        if (cbm_elixir_suppress_stdlib_weak_match(lang == CBM_LANG_ELIXIR, call->callee_name,
+                                                  res.strategy)) {
             continue;
         }
 
@@ -2437,7 +2460,8 @@ static void resolve_file_calls(resolve_ctx_t *rc, resolve_worker_state_t *ws, CB
 /* Resolve usages for one file. */
 static void resolve_file_usages(resolve_ctx_t *rc, resolve_worker_state_t *ws,
                                 CBMFileResult *result, const char *rel, const char *module_qn,
-                                const char **imp_keys, const char **imp_vals, int imp_count) {
+                                const char **imp_keys, const char **imp_vals, int imp_count,
+                                CBMLanguage lang) {
     for (int u = 0; u < result->usages.count; u++) {
         CBMUsage *usage = &result->usages.items[u];
         if (!usage->ref_name) {
@@ -2450,6 +2474,13 @@ static void resolve_file_usages(resolve_ctx_t *rc, resolve_worker_state_t *ws,
         }
         cbm_resolution_t res = cbm_registry_resolve(rc->registry, usage->ref_name, module_qn,
                                                     imp_keys, imp_vals, imp_count);
+        /* Elixir `@attr` reads live under the defmodule QN, one level below the
+         * file-module QN the registry probes — same scope-local upgrade as the
+         * calls path above. */
+        if (lang == CBM_LANG_ELIXIR) {
+            cbm_registry_scope_local_override(rc->registry, usage->ref_name,
+                                              usage->enclosing_func_qn, &res);
+        }
         if (!res.qualified_name || res.qualified_name[0] == '\0') {
             continue;
         }
@@ -2886,7 +2917,7 @@ static void resolve_worker(int worker_id, void *ctx_ptr) {
 
         /* ── USAGE resolution ──────────────────────────────────── */
         _ph_t0 = extract_now_ns();
-        resolve_file_usages(rc, ws, result, rel, module_qn, imp_keys, imp_vals, imp_count);
+        resolve_file_usages(rc, ws, result, rel, module_qn, imp_keys, imp_vals, imp_count, lang);
         atomic_fetch_add_explicit(&rc->time_ns_usages, extract_now_ns() - _ph_t0,
                                   memory_order_relaxed);
 

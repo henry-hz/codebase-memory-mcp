@@ -1431,6 +1431,23 @@ static char *extract_callee_name(CBMArena *a, TSNode node, const char *source, C
         }
     }
 
+    /* Elixir attribute definition: `@timeout 9_000` is unary_operator(@, call
+     * timeout(9_000)) — the "call" is the attribute NAME, not an invocation,
+     * and generic field resolution below would return "timeout" via the target
+     * field, minting a phantom CALLS edge whenever a same-named function
+     * exists. Must run BEFORE extract_callee_from_fields. Calls nested in the
+     * VALUE (`@x compute(1)`) keep their edge — their parent is `arguments`. */
+    if (lang == CBM_LANG_ELIXIR && strcmp(ts_node_type(node), "call") == 0) {
+        TSNode apar = ts_node_parent(node);
+        if (!ts_node_is_null(apar) && strcmp(ts_node_type(apar), "unary_operator") == 0) {
+            TSNode aop = ts_node_child_by_field_name(apar, TS_FIELD("operator"));
+            if (!ts_node_is_null(aop) && ts_node_end_byte(aop) - ts_node_start_byte(aop) == 1 &&
+                source[ts_node_start_byte(aop)] == '@') {
+                return NULL;
+            }
+        }
+    }
+
     // Try common field-based resolution first
     char *name = extract_callee_from_fields(a, node, source);
     if (name) {

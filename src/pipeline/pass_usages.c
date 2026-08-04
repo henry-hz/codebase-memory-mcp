@@ -220,7 +220,7 @@ static const cbm_gbuf_node_t *find_enclosing_node(cbm_pipeline_ctx_t *ctx, const
 /* Resolve USAGE edges for one file's extracted usages. */
 static int resolve_usage_edges(cbm_pipeline_ctx_t *ctx, const CBMFileResult *result,
                                const char *rel, const char *module_qn, const char **imp_keys,
-                               const char **imp_vals, int imp_count) {
+                               const char **imp_vals, int imp_count, CBMLanguage lang) {
     int resolved = 0;
     for (int u = 0; u < result->usages.count; u++) {
         CBMUsage *usage = &result->usages.items[u];
@@ -235,6 +235,13 @@ static int resolve_usage_edges(cbm_pipeline_ctx_t *ctx, const CBMFileResult *res
 
         cbm_resolution_t res = cbm_registry_resolve(ctx->registry, usage->ref_name, module_qn,
                                                     imp_keys, imp_vals, imp_count);
+        /* Elixir `@attr` reads live under the defmodule QN, one level below the
+         * file-module QN the registry probes — same scope-local upgrade as the
+         * calls pass. */
+        if (lang == CBM_LANG_ELIXIR) {
+            cbm_registry_scope_local_override(ctx->registry, usage->ref_name,
+                                              usage->enclosing_func_qn, &res);
+        }
         if (!res.qualified_name || res.qualified_name[0] == '\0') {
             continue;
         }
@@ -378,8 +385,8 @@ int cbm_pipeline_pass_usages(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *fil
         char *module_qn = cbm_pipeline_fqn_module_dir(ctx->project_name, rel,
                                                       pu_module_is_dir(files[i].language));
 
-        usage_resolved +=
-            resolve_usage_edges(ctx, result, rel, module_qn, imp_keys, imp_vals, imp_count);
+        usage_resolved += resolve_usage_edges(ctx, result, rel, module_qn, imp_keys, imp_vals,
+                                              imp_count, files[i].language);
         throw_resolved +=
             resolve_throw_edges(ctx, result, rel, module_qn, imp_keys, imp_vals, imp_count);
         rw_resolved += resolve_rw_edges(ctx, result, rel, module_qn, imp_keys, imp_vals, imp_count);

@@ -411,10 +411,12 @@ Four corrections. Each was checked against a real parse before any code changed.
    that gap. The headline framing was wrong; the specific defects it named were all real.
 
 2. **The 86%-vs-95% "arithmetic discrepancy" is not Elixir-specific and is not stale.** §1 says
-   one of the two numbers must be wrong and to correct whichever it is. In fact *every* row in
-   `docs/BENCHMARK.md` that contains a PARTIAL is short by exactly 0.5 per PARTIAL — the recorded
-   numerator is `#PASS − 0.5 × #PARTIAL`, verified across Python, JavaScript, Erlang, Elixir,
-   OCaml, Haskell, Scala, Ruby and Swift. Rescoring Elixir alone would have made it incomparable
+   one of the two numbers must be wrong and to correct whichever it is. In fact every original
+   2026-03-01 row in `docs/BENCHMARK.md` that contains a PARTIAL is short by exactly 1.0 per
+   PARTIAL — the recorded numerator is `#PASS − 0.5 × #PARTIAL` where the rubric specifies
+   `#PASS + 0.5 × #PARTIAL` — verified across Python, JavaScript, Erlang, Elixir, OCaml, Haskell,
+   Scala, Ruby and Swift (the later PHP-LSP and kernel-stress re-measurements follow their own
+   conventions; see the methodology note). Rescoring Elixir alone would have made it incomparable
    with the other 34 rows. The finding is now documented in `docs/BENCHMARK.md`'s methodology
    section instead, and the affected rows are left as recorded. Moot for the delta claimed here:
    the new Elixir row has no PARTIAL, so 12/12 is the same under either reading.

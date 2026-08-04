@@ -516,6 +516,17 @@ static int resolve_single_call(cbm_pipeline_ctx_t *ctx, CBMCall *call,
 
     cbm_resolution_t res = cbm_registry_resolve(ctx->registry, call->callee_name, module_qn,
                                                 imp_keys, imp_vals, imp_count);
+    /* Elixir: definitions are module-qualified (proj.lib.x.Mod.fn), so the
+     * registry's file-module same_module probe misses every bare in-module
+     * call and they land on unique_name/suffix_match — or cross-wire to a
+     * same-named function in another module. Re-derive the module from the
+     * CALLER's QN and take the exact hit when it exists. Runs after the
+     * registry (its per-file resolve cache keys on callee_name alone; this
+     * depends on the per-call enclosing scope, so it must stay outside). */
+    if (lang == CBM_LANG_ELIXIR) {
+        cbm_registry_scope_local_override(ctx->registry, call->callee_name, call->enclosing_func_qn,
+                                          &res);
+    }
     if (!res.qualified_name || res.qualified_name[0] == '\0') {
         /* Resolution is empty when the callee belongs to an EXTERNAL client
          * library whose source is not in the indexed tree (e.g. `requests.get`,
@@ -573,6 +584,15 @@ static int resolve_single_call(cbm_pipeline_ctx_t *ctx, CBMCall *call,
      * to Perl — other languages are unaffected. */
     if (cbm_perl_suppress_generic_match(lang == CBM_LANG_PERL, call->is_method, call->callee_name,
                                         res.strategy)) {
+        return 0;
+    }
+
+    /* Elixir stdlib noise guard: `Enum.map` / `Keyword.get` / `:ets.new` have
+     * no in-tree target, so any weak short-name match binding them to a project
+     * symbol is a false edge. Exact/import strategies pass through (see
+     * cbm_elixir_suppress_stdlib_weak_match). Gated to Elixir. */
+    if (cbm_elixir_suppress_stdlib_weak_match(lang == CBM_LANG_ELIXIR, call->callee_name,
+                                              res.strategy)) {
         return 0;
     }
 

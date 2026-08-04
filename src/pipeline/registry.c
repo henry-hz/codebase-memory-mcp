@@ -455,6 +455,96 @@ bool cbm_tsjs_suppress_weak_method_match(bool is_tsjs, bool is_method, const cha
            strcmp(strategy, "field_type_hint") == 0 || strcmp(strategy, "fuzzy") == 0;
 }
 
+/* Elixir standard-library module names (first dotted segment of a remote call).
+ * A weak short-name match binding `Enum.map` or `Keyword.get` to a project
+ * symbol that merely shares the simple name is always a false edge — the real
+ * target lives outside the indexed tree. Qualified-tail and import/same-module
+ * strategies are exact and stay: a project that genuinely defines `File.read`
+ * resolves via qualified_suffix before any weak strategy runs. */
+static const char *ELIXIR_STDLIB_MODULES[] = {"Access",
+                                              "Agent",
+                                              "Application",
+                                              "Atom",
+                                              "Base",
+                                              "Behaviour",
+                                              "Bitwise",
+                                              "Calendar",
+                                              "Code",
+                                              "Config",
+                                              "Date",
+                                              "DateTime",
+                                              "Duration",
+                                              "DynamicSupervisor",
+                                              "Enum",
+                                              "Enumerable",
+                                              "Exception",
+                                              "File",
+                                              "Float",
+                                              "Function",
+                                              "GenEvent",
+                                              "GenServer",
+                                              "IO",
+                                              "Inspect",
+                                              "Integer",
+                                              "JSON",
+                                              "Kernel",
+                                              "Keyword",
+                                              "List",
+                                              "Logger",
+                                              "Macro",
+                                              "Map",
+                                              "MapSet",
+                                              "Module",
+                                              "NaiveDateTime",
+                                              "Node",
+                                              "OptionParser",
+                                              "PartitionSupervisor",
+                                              "Path",
+                                              "Port",
+                                              "Process",
+                                              "Protocol",
+                                              "Range",
+                                              "Record",
+                                              "Regex",
+                                              "Registry",
+                                              "Stream",
+                                              "String",
+                                              "StringIO",
+                                              "Supervisor",
+                                              "System",
+                                              "Task",
+                                              "Time",
+                                              "Tuple",
+                                              "URI",
+                                              "Version",
+                                              NULL};
+
+bool cbm_elixir_suppress_stdlib_weak_match(bool is_elixir, const char *callee_name,
+                                           const char *strategy) {
+    if (!is_elixir || !callee_name || !callee_name[0] || !strategy || !strategy[0]) {
+        return false;
+    }
+    if (strcmp(strategy, "suffix_match") != 0 && strcmp(strategy, "unique_name") != 0 &&
+        strcmp(strategy, "field_type_hint") != 0 && strcmp(strategy, "fuzzy") != 0) {
+        return false; /* exact/import-aware strategy — keep the edge */
+    }
+    /* Erlang interop (`:ets.new`, `:telemetry.execute`) — always external. */
+    if (callee_name[0] == ':') {
+        return true;
+    }
+    const char *dot = strchr(callee_name, '.');
+    if (!dot || dot == callee_name) {
+        return false; /* bare local call — scope-local resolution handles it */
+    }
+    size_t plen = (size_t)(dot - callee_name);
+    for (const char **m = ELIXIR_STDLIB_MODULES; *m; m++) {
+        if (strlen(*m) == plen && strncmp(*m, callee_name, plen) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
 /* ── Lifecycle ──────────────────────────────────────────────────── */
 
 cbm_registry_t *cbm_registry_new(void) {
@@ -554,6 +644,47 @@ bool cbm_registry_exists(const cbm_registry_t *r, const char *qn) {
         return false;
     }
     return cbm_ht_get(r->exact, qn) != NULL;
+}
+
+bool cbm_registry_scope_local_override(const cbm_registry_t *r, const char *callee_name,
+                                       const char *enclosing_func_qn, cbm_resolution_t *res) {
+    if (!r || !callee_name || !callee_name[0] || !res) {
+        return false;
+    }
+    /* Bare names only: a qualified callee carries its own scope signal and is
+     * the qualified_suffix strategy's job. */
+    if (strchr(callee_name, '.') || strchr(callee_name, ':')) {
+        return false;
+    }
+    /* Never demote an exact/import-aware match — only upgrade a weak short-name
+     * guess or a complete miss. */
+    if (res->qualified_name && res->qualified_name[0] &&
+        strcmp(res->strategy, "unique_name") != 0 && strcmp(res->strategy, "suffix_match") != 0) {
+        return false;
+    }
+    if (!enclosing_func_qn || !enclosing_func_qn[0]) {
+        return false;
+    }
+    const char *dot = strrchr(enclosing_func_qn, '.');
+    if (!dot || dot == enclosing_func_qn) {
+        return false;
+    }
+    /* <enclosing module>.<callee> — the module scope is the caller's own QN
+     * minus its final segment. This is what resolve_same_module cannot see:
+     * it probes under the FILE module, and module-qualified definitions
+     * (Elixir `proj.lib.conn.Plug.Conn.fetch`) sit one level deeper. */
+    char candidate[CBM_SZ_512];
+    int n = snprintf(candidate, sizeof(candidate), "%.*s.%s", (int)(dot - enclosing_func_qn),
+                     enclosing_func_qn, callee_name);
+    if (n <= 0 || (size_t)n >= sizeof(candidate)) {
+        return false;
+    }
+    const char *stored_key = cbm_ht_get_key(r->exact, candidate);
+    if (!stored_key) {
+        return false;
+    }
+    *res = (cbm_resolution_t){stored_key, "same_module", CONF_SAME_MODULE, REG_RESOLVED};
+    return true;
 }
 
 const char *cbm_registry_label_of(const cbm_registry_t *r, const char *qn) {

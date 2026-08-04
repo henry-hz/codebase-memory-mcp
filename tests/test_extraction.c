@@ -983,6 +983,26 @@ static int count_defs_with_name(CBMFileResult *r, const char *name) {
     return count;
 }
 
+/* The definition whose qualified name is `qn`, or NULL. */
+static CBMDefinition *find_def_qn(CBMFileResult *r, const char *qn) {
+    for (int i = 0; i < r->defs.count; i++) {
+        if (r->defs.items[i].qualified_name && strcmp(r->defs.items[i].qualified_name, qn) == 0)
+            return &r->defs.items[i];
+    }
+    return NULL;
+}
+
+/* True when a usage of `ref` was recorded with the given enclosing QN. */
+static int has_usage_from(CBMFileResult *r, const char *ref, const char *enclosing_qn) {
+    for (int i = 0; i < r->usages.count; i++) {
+        if (r->usages.items[i].ref_name && strcmp(r->usages.items[i].ref_name, ref) == 0 &&
+            r->usages.items[i].enclosing_func_qn && enclosing_qn &&
+            strcmp(r->usages.items[i].enclosing_func_qn, enclosing_qn) == 0)
+            return 1;
+    }
+    return 0;
+}
+
 TEST(elixir_function) {
     CBMFileResult *r = extract("defmodule Greeter do\n  def greet(name), do: \"Hello #{name}\"\n  "
                                "defp helper, do: nil\nend\n",
@@ -1022,26 +1042,32 @@ TEST(elixir_qn_module_qualified) {
     PASS();
 }
 
-/* Multi-clause defs are one function. A `when` guard wraps the head in a
- * binary_operator; before this was unwrapped every guarded head was dropped
- * (102 of them in elixir-plug/plug, including Plug.Conn.get_req_header). */
+/* Multi-clause defs are ONE definition, merged at extraction: the span covers
+ * first-clause-start .. last-clause-end (so get_code_snippet returns every
+ * clause), the FIRST head's parameter list is the signature, and the arity set
+ * accumulates. A `when` guard wraps the head in a binary_operator; before this
+ * was unwrapped every guarded head was dropped (102 of them in
+ * elixir-plug/plug, including Plug.Conn.get_req_header). */
 TEST(elixir_multi_clause_single_node) {
     CBMFileResult *r = extract("defmodule Router do\n"
                                "  def call(conn, %{a: 1}), do: conn\n"
                                "  def call(conn, opts) when is_map(opts), do: conn\n"
                                "  def call(conn, _), do: conn\n"
+                               "  def call(conn), do: conn\n"
                                "end\n",
                                CBM_LANG_ELIXIR, "t", "router.ex");
     ASSERT_NOT_NULL(r);
     ASSERT_FALSE(r->has_error);
-    /* The guarded clause is extracted (it would be missing entirely otherwise). */
-    ASSERT_EQ(3, count_defs_with_name(r, "call"));
-    /* All three clauses share one QN, so the graph holds a single node. */
-    for (int i = 0; i < r->defs.count; i++) {
-        if (strcmp(r->defs.items[i].name, "call") == 0) {
-            ASSERT_STR_EQ("t.router.Router.call", r->defs.items[i].qualified_name);
-        }
-    }
+    /* All clauses (guarded one included) merge into a single definition. */
+    ASSERT_EQ(1, count_defs_with_name(r, "call"));
+    CBMDefinition *def = find_def_qn(r, "t.router.Router.call");
+    ASSERT_NOT_NULL(def);
+    ASSERT_EQ(2, (int)def->start_line); /* first clause */
+    ASSERT_EQ(5, (int)def->end_line);   /* last clause */
+    ASSERT_NOT_NULL(def->signature);
+    ASSERT_STR_EQ("(conn, %{a: 1})", def->signature); /* first-seen head */
+    ASSERT_NOT_NULL(def->arities);
+    ASSERT_STR_EQ("1,2", def->arities);
     cbm_free_result(r);
     PASS();
 }
@@ -1195,6 +1221,151 @@ TEST(elixir_pipe_bare_callee) {
     ASSERT(has_call(r, "IO.inspect"));
     ASSERT(has_call(r, "put_resp_header"));
     ASSERT_STR_EQ("t.p.P.run", call_enclosing_qn(r, "halt"));
+    cbm_free_result(r);
+    PASS();
+}
+
+/* Defs live inside statement containers all over real Elixir: the `else` of a
+ * version-gated `if/else`, `case` arms, `rescue` clauses. The def walk must
+ * descend through them (grammar: else_block holds calls; rescue/catch blocks
+ * hold stab_clauses; a stab_clause's statements sit under `body`) or the def
+ * vanishes while the call-scope walker still names it — its inner calls then
+ * source to a QN no node carries and get pinned to the File node. */
+TEST(elixir_def_in_container_blocks) {
+    CBMFileResult *r = extract("defmodule Gated do\n"
+                               "  if function_exported?(String, :length, 1) do\n"
+                               "    def visible(x), do: mark_a(x)\n"
+                               "  else\n"
+                               "    def hidden(x), do: mark_b(x)\n"
+                               "  end\n"
+                               "  case :os.type() do\n"
+                               "    {:unix, _} -> def unixy(x), do: mark_c(x)\n"
+                               "    _ -> def other(x), do: mark_d(x)\n"
+                               "  end\n"
+                               "  try do\n"
+                               "    :ok\n"
+                               "  rescue\n"
+                               "    _ -> def rescued(x), do: mark_e(x)\n"
+                               "  end\n"
+                               "end\n",
+                               CBM_LANG_ELIXIR, "t", "gated.ex");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT(has_def_qn(r, "t.gated.Gated.visible"));
+    ASSERT(has_def_qn(r, "t.gated.Gated.hidden"));
+    ASSERT(has_def_qn(r, "t.gated.Gated.unixy"));
+    ASSERT(has_def_qn(r, "t.gated.Gated.other"));
+    ASSERT(has_def_qn(r, "t.gated.Gated.rescued"));
+    /* Lockstep with the call-scope side for a def the old walk dropped. */
+    ASSERT_STR_EQ("t.gated.Gated.hidden", call_enclosing_qn(r, "mark_b"));
+    ASSERT_STR_EQ("t.gated.Gated.rescued", call_enclosing_qn(r, "mark_e"));
+    cbm_free_result(r);
+    PASS();
+}
+
+/* Keyword-form bodies: `defmodule KW, do: def(...)` has no do_block — the body
+ * is the value of the `do:` pair inside the arguments' keyword list. */
+TEST(elixir_keyword_form_body) {
+    CBMFileResult *r = extract("defmodule KW, do: def(kwfun, do: 1)\n", CBM_LANG_ELIXIR, "t",
+                               "kw.ex");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT(has_def(r, "Class", "KW"));
+    ASSERT(has_def_qn(r, "t.kw.KW.kwfun"));
+    cbm_free_result(r);
+    PASS();
+}
+
+/* defimpl name shapes. `for: [Tuple, Map]` generates one module per element:
+ * the shared body is scoped under the first, the rest still get Class nodes and
+ * protocol bases. A nested `defimpl Proto do` without `for:` targets the
+ * ENCLOSING module (compiled name Proto.<Enclosing>) — naming it `Proto` made
+ * the base self-resolve and suppressed the IMPLEMENTS edge as a self-edge. A
+ * dynamic module name (`defmodule Module.concat(A, B)`) emits no Class at all,
+ * but its body still extracts under the outer scope, matching the call-scope
+ * walker. */
+TEST(elixir_defimpl_variants) {
+    CBMFileResult *r = extract("defprotocol Sz do\n"
+                               "  def size(data)\n"
+                               "end\n"
+                               "defimpl Sz, for: [Tuple, Map] do\n"
+                               "  def size(_t), do: 0\n"
+                               "end\n"
+                               "defmodule Wrap do\n"
+                               "  defimpl String.Chars do\n"
+                               "    def to_string(_w), do: \"w\"\n"
+                               "  end\n"
+                               "end\n"
+                               "defmodule Module.concat(A, B) do\n"
+                               "  def dyn_fn(x), do: x\n"
+                               "end\n",
+                               CBM_LANG_ELIXIR, "t", "f.ex");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT(has_def(r, "Class", "Sz.Tuple"));
+    ASSERT(has_def(r, "Class", "Sz.Map"));
+    ASSERT(has_base_class(r, "Sz.Tuple", "Sz"));
+    ASSERT(has_base_class(r, "Sz.Map", "Sz"));
+    /* One shared body, scoped under the first element. */
+    ASSERT(has_def_qn(r, "t.f.Sz.Tuple.size"));
+    /* Nested no-for impl is named after the enclosing module. */
+    ASSERT(has_def(r, "Class", "String.Chars.Wrap"));
+    ASSERT(has_base_class(r, "String.Chars.Wrap", "String.Chars"));
+    ASSERT_FALSE(has_def(r, "Class", "String.Chars"));
+    ASSERT(has_def_qn(r, "t.f.Wrap.String.Chars.Wrap.to_string"));
+    /* Dynamic module: no Class node, body extracted at the outer (file) scope. */
+    ASSERT_EQ(0, count_defs_with_name(r, "Module.concat(A, B)"));
+    ASSERT(has_def_qn(r, "t.f.dyn_fn"));
+    cbm_free_result(r);
+    PASS();
+}
+
+/* Operator definitions are functions named by their operator token. Dynamic
+ * heads (`def unquote(nm)(x)`) have no stable name and emit nothing. */
+TEST(elixir_operator_def) {
+    CBMFileResult *r = extract("defmodule OpDefs do\n"
+                               "  def a <> b, do: {a, b}\n"
+                               "  def -a, do: a\n"
+                               "  def unquote(nm)(x), do: x\n"
+                               "  def normal(x), do: x\n"
+                               "end\n",
+                               CBM_LANG_ELIXIR, "t", "opdefs.ex");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT(has_def_qn(r, "t.opdefs.OpDefs.<>"));
+    ASSERT(has_def_qn(r, "t.opdefs.OpDefs.-"));
+    CBMDefinition *op = find_def_qn(r, "t.opdefs.OpDefs.<>");
+    ASSERT_NOT_NULL(op);
+    ASSERT_STR_EQ("2", op->arities);
+    ASSERT_EQ(0, count_defs_with_name(r, "unquote(nm)"));
+    ASSERT(has_def_qn(r, "t.opdefs.OpDefs.normal"));
+    cbm_free_result(r);
+    PASS();
+}
+
+/* `@timeout 9_000` parses as unary_operator(@, call timeout(9_000)) — the
+ * inner call is the attribute NAME, not an invocation; with a same-named
+ * function in the module it minted a phantom CALLS edge. Calls nested in the
+ * VALUE (`@limits compute_limits(1)`) are real compile-time calls and stay.
+ * An attribute READ (`@timeout` with an identifier operand) is a usage of the
+ * `@timeout` Variable, attributed to the reading function. */
+TEST(elixir_attr_calls_and_usage) {
+    CBMFileResult *r = extract("defmodule Cfg2 do\n"
+                               "  @timeout 5_000\n"
+                               "  @ceiling compute_max(1)\n"
+                               "  def timeout, do: @timeout\n"
+                               "  def compute_max(x), do: x\n"
+                               "end\n",
+                               CBM_LANG_ELIXIR, "t", "cfg2.ex");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    /* Attribute NAMES never become callees (has_call matches substrings, so
+     * the names here must not be substrings of the real callee below). */
+    ASSERT_FALSE(has_call(r, "timeout"));
+    ASSERT_FALSE(has_call(r, "ceiling"));
+    ASSERT(has_call(r, "compute_max"));
+    ASSERT(has_def(r, "Variable", "@timeout"));
+    ASSERT(has_usage_from(r, "@timeout", "t.cfg2.Cfg2.timeout"));
     cbm_free_result(r);
     PASS();
 }
@@ -5392,6 +5563,11 @@ SUITE(extraction) {
     RUN_TEST(elixir_module_attribute_variable);
     RUN_TEST(elixir_behaviour_implements);
     RUN_TEST(elixir_pipe_bare_callee);
+    RUN_TEST(elixir_def_in_container_blocks);
+    RUN_TEST(elixir_keyword_form_body);
+    RUN_TEST(elixir_defimpl_variants);
+    RUN_TEST(elixir_operator_def);
+    RUN_TEST(elixir_attr_calls_and_usage);
     RUN_TEST(haskell_function);
     RUN_TEST(ocaml_function);
     RUN_TEST(erlang_function);

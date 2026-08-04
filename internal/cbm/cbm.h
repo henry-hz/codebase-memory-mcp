@@ -187,6 +187,7 @@ typedef struct {
     uint32_t start_line;
     uint32_t end_line;
     const char *signature;     // parameter text (NULL if none)
+    const char *arities;       // Elixir: sorted arity set of all clauses ("1,3"; NULL elsewhere)
     const char *return_type;   // return type text (NULL if none)
     const char *receiver;      // Go method receiver (NULL if none)
     const char *docstring;     // leading doc comment (NULL if none)

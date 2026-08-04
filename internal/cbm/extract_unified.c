@@ -186,13 +186,7 @@ static const char *compute_elixir_func_qn(CBMExtractCtx *ctx, TSNode node, const
         return NULL;
     }
     TSNode head = cbm_elixir_def_head(first_arg, ctx->source);
-    const char *fk = ts_node_type(head);
-    char *name = NULL;
-    if (strcmp(fk, "call") == 0 && ts_node_child_count(head) > 0) {
-        name = cbm_node_text(ctx->arena, ts_node_child(head, 0), ctx->source);
-    } else if (strcmp(fk, "identifier") == 0) {
-        name = cbm_node_text(ctx->arena, head, ctx->source);
-    }
+    const char *name = cbm_elixir_def_name(ctx->arena, head, ctx->source, NULL);
     if (!name || !name[0]) {
         return NULL;
     }
@@ -204,7 +198,7 @@ static const char *compute_elixir_func_qn(CBMExtractCtx *ctx, TSNode node, const
  * cbm_elixir_module_name(). */
 static const char *compute_elixir_module_qn(CBMExtractCtx *ctx, TSNode node,
                                             const char *parent_qn) {
-    const char *name = cbm_elixir_module_name(ctx->arena, node, ctx->source);
+    const char *name = cbm_elixir_module_name(ctx->arena, node, ctx->source, parent_qn);
     if (!name) {
         return NULL;
     }

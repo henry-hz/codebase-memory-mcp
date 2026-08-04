@@ -256,6 +256,28 @@ bool cbm_perl_suppress_generic_match(bool is_perl, bool is_method, const char *c
  * Pure; unit-tested in test_registry.c. */
 bool cbm_tsjs_suppress_weak_method_match(bool is_tsjs, bool is_method, const char *strategy);
 
+/* Decide whether a resolved Elixir call edge to a standard-library-qualified
+ * callee (`Enum.map`, `Keyword.get`, `:ets.new`) is weak-strategy noise to drop:
+ * true only when the first dotted segment names a stdlib module (or the callee
+ * is an Erlang `:mod.fun` interop call) AND the match used a weak short-name
+ * strategy. Exact qualified/import/same-module matches are kept, so a project
+ * genuinely defining `File.read` still resolves. Pure; callers gate on the file
+ * language. */
+bool cbm_elixir_suppress_stdlib_weak_match(bool is_elixir, const char *callee_name,
+                                           const char *strategy);
+
+/* Upgrade a weakly-resolved (or unresolved) BARE callee to an exact same-module
+ * match derived from the CALLER's scope: <enclosing_func_qn minus its last
+ * segment>.<callee>. Registry same_module probes under the per-file module QN,
+ * which module-qualified definitions (Elixir) sit one level below — without
+ * this, every bare in-module call resolves at unique_name 0.75 or worse and
+ * same-named functions across modules can cross-wire. Returns true and rewrites
+ * *res (strategy "same_module") when the exact QN exists; never demotes an
+ * import/qualified/lsp match. Also correct for usage refs ("@timeout"). Pure
+ * lookup; callers gate on language. */
+bool cbm_registry_scope_local_override(const cbm_registry_t *r, const char *callee_name,
+                                       const char *enclosing_func_qn, cbm_resolution_t *res);
+
 /* Get the label of a qualified name, or NULL if not found. */
 const char *cbm_registry_label_of(const cbm_registry_t *r, const char *qn);
 

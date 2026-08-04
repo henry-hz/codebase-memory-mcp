@@ -803,6 +803,71 @@ TEST(tsjs_suppress_keeps_high_confidence_and_non_methods) {
     PASS();
 }
 
+TEST(elixir_stdlib_suppress_drops_weak_matches_only) {
+    /* An Elixir stdlib-qualified callee (or Erlang :mod interop) that landed
+     * via a weak short-name strategy is a false edge — the real target is
+     * outside the tree. Exact/import-aware strategies stay: a project that
+     * genuinely defines File.read resolves via qualified_suffix. */
+    ASSERT_TRUE(cbm_elixir_suppress_stdlib_weak_match(true, "Enum.map", "suffix_match"));
+    ASSERT_TRUE(cbm_elixir_suppress_stdlib_weak_match(true, "Keyword.get", "unique_name"));
+    ASSERT_TRUE(cbm_elixir_suppress_stdlib_weak_match(true, "String.trim", "field_type_hint"));
+    ASSERT_TRUE(cbm_elixir_suppress_stdlib_weak_match(true, ":ets.new", "unique_name"));
+    /* Exact strategies keep the edge, even for a stdlib-looking prefix. */
+    ASSERT_FALSE(cbm_elixir_suppress_stdlib_weak_match(true, "File.read", "qualified_suffix"));
+    ASSERT_FALSE(cbm_elixir_suppress_stdlib_weak_match(true, "Enum.map", "import_map"));
+    ASSERT_FALSE(cbm_elixir_suppress_stdlib_weak_match(true, "Enum.map", "same_module"));
+    /* Project-module prefixes are not stdlib; bare names are scope-local's job. */
+    ASSERT_FALSE(cbm_elixir_suppress_stdlib_weak_match(true, "Plug.Conn.halt", "suffix_match"));
+    ASSERT_FALSE(cbm_elixir_suppress_stdlib_weak_match(true, "halt", "unique_name"));
+    /* Language gate and empty-strategy guard. */
+    ASSERT_FALSE(cbm_elixir_suppress_stdlib_weak_match(false, "Enum.map", "suffix_match"));
+    ASSERT_FALSE(cbm_elixir_suppress_stdlib_weak_match(true, "Enum.map", ""));
+    ASSERT_FALSE(cbm_elixir_suppress_stdlib_weak_match(true, "Enum.map", NULL));
+    PASS();
+}
+
+TEST(elixir_scope_local_override_upgrades_bare_calls) {
+    /* Module-qualified definitions sit one level below the file-module QN, so
+     * the registry's same_module probe misses and bare in-module calls land on
+     * unique_name — or cross-wire to a same-named def in another module. The
+     * override re-derives the module from the CALLER's QN and takes the exact
+     * hit at same_module confidence. */
+    cbm_registry_t *r = cbm_registry_new();
+    cbm_registry_add(r, "fetch", "proj.lib.conn.Plug.Conn.fetch", "Function");
+    cbm_registry_add(r, "fetch", "proj.lib.other.Other.fetch", "Function");
+    cbm_registry_add(r, "@timeout", "proj.lib.conn.Plug.Conn.@timeout", "Variable");
+
+    /* Two same-named candidates: the registry resolves weakly; the caller's
+     * scope decides. */
+    cbm_resolution_t res = cbm_registry_resolve(r, "fetch", "proj.lib.conn", NULL, NULL, 0);
+    ASSERT_TRUE(cbm_registry_scope_local_override(r, "fetch",
+                                                  "proj.lib.conn.Plug.Conn.get_req_header", &res));
+    ASSERT_STR_EQ("proj.lib.conn.Plug.Conn.fetch", res.qualified_name);
+    ASSERT_STR_EQ("same_module", res.strategy);
+
+    /* Attribute usage refs upgrade the same way. */
+    cbm_resolution_t ures = cbm_registry_resolve(r, "@timeout", "proj.lib.conn", NULL, NULL, 0);
+    ASSERT_TRUE(cbm_registry_scope_local_override(r, "@timeout",
+                                                  "proj.lib.conn.Plug.Conn.timeout", &ures));
+    ASSERT_STR_EQ("proj.lib.conn.Plug.Conn.@timeout", ures.qualified_name);
+
+    /* Never fires for qualified callees, foreign scopes, or non-weak results. */
+    cbm_resolution_t qres = {NULL, "", 0.0, 0};
+    ASSERT_FALSE(cbm_registry_scope_local_override(r, "Conn.fetch",
+                                                   "proj.lib.conn.Plug.Conn.get_req_header",
+                                                   &qres));
+    ASSERT_FALSE(
+        cbm_registry_scope_local_override(r, "fetch", "proj.lib.zzz.Nope.caller", &qres));
+    cbm_resolution_t ires = {"proj.lib.other.Other.fetch", "import_map", 0.95, 1};
+    ASSERT_FALSE(cbm_registry_scope_local_override(r, "fetch",
+                                                   "proj.lib.conn.Plug.Conn.get_req_header",
+                                                   &ires));
+    ASSERT_STR_EQ("proj.lib.other.Other.fetch", ires.qualified_name);
+
+    cbm_registry_free(r);
+    PASS();
+}
+
 /* ── Suite ─────────────────────────────────────────────────────── */
 
 /* Method call THROUGH an imported symbol that is itself an indexed node
@@ -895,4 +960,6 @@ SUITE(registry) {
     RUN_TEST(perl_suppress_keeps_high_confidence_and_genuine_calls);
     RUN_TEST(tsjs_suppress_drops_weak_method_matches);
     RUN_TEST(tsjs_suppress_keeps_high_confidence_and_non_methods);
+    RUN_TEST(elixir_stdlib_suppress_drops_weak_matches_only);
+    RUN_TEST(elixir_scope_local_override_upgrades_bare_calls);
 }

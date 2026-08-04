@@ -1539,6 +1539,27 @@ static bool import_targetable_label(const char *label) {
     return false;
 }
 
+/* Stricter filter for FULL-dotted-path candidates: an import string names a
+ * module-like container, never a function. Lua (`function config.keymaps()`)
+ * and R (`data.table <- function(x)`) both mint Functions whose `name` is a
+ * dotted path; matching `require("config.keymaps")` / `library(data.table)`
+ * against them by exact full name fabricates an IMPORTS edge to a function in
+ * an unrelated file — and the parallel venue's import map is built FROM those
+ * edges, so the noise reaches call resolution. Elixir aliases, the reason the
+ * full-path candidate exists, always target Class/Interface module nodes. */
+static bool module_like_label(const char *label) {
+    if (!label) {
+        return false;
+    }
+    static const char *ok[] = {"Class", "Interface", "Module", "Struct", "File", NULL};
+    for (const char **l = ok; *l; l++) {
+        if (strcmp(*l, label) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static const char *path_leaf(const char *path) {
     const char *leaf = path;
     for (const char *p = path; p && *p; p++) {
@@ -1775,7 +1796,7 @@ const cbm_gbuf_node_t *cbm_pipeline_find_dotted_module(const cbm_gbuf_t *gbuf,
     const cbm_gbuf_node_t *best = NULL;
     for (int i = 0; i < n; i++) {
         const cbm_gbuf_node_t *cand = hits[i];
-        if (!cand || !import_targetable_label(cand->label)) {
+        if (!cand || !module_like_label(cand->label)) {
             continue;
         }
         if (!best || (cand->qualified_name && best->qualified_name &&
@@ -1940,12 +1961,16 @@ const cbm_gbuf_node_t *cbm_pipeline_resolve_import_node(const cbm_pipeline_ctx_t
          * `alias Plug.X` in the project collapsed onto the node named "Plug".
          * A miss here costs one hash lookup and leaves every other language's
          * resolution exactly as it was; a hit is a full-name match, which is
-         * strictly more specific than any trailing segment. */
+         * strictly more specific than any trailing segment — but ONLY against
+         * module-like nodes (see module_like_label): dotted Function names in
+         * Lua/R would otherwise steal the edge by exact-name coincidence. */
+        int full_idx = -1;
         char mp_full[1024];
         snprintf(mp_full, sizeof(mp_full), "%s", mp);
         if (mp_full[0] && strchr(mp_full, '.') && ncands < 8) {
             memmove(&cands[1], &cands[0], sizeof(cands[0]) * (size_t)ncands);
             cands[0] = mp_full;
+            full_idx = 0;
             ncands++;
         }
         /* Walk segments from the end. */
@@ -1991,7 +2016,9 @@ const cbm_gbuf_node_t *cbm_pipeline_resolve_import_node(const cbm_pipeline_ctx_t
                 const cbm_gbuf_node_t *best = NULL;
                 for (int i = 0; i < n; i++) {
                     const cbm_gbuf_node_t *cand = hits[i];
-                    if (!cand || !import_targetable_label(cand->label)) {
+                    bool ok = ci == full_idx ? module_like_label(cand ? cand->label : NULL)
+                                             : import_targetable_label(cand ? cand->label : NULL);
+                    if (!cand || !ok) {
                         continue;
                     }
                     if (source_file_qn && cand->qualified_name &&

@@ -284,6 +284,7 @@ static void build_def_props(char *buf, size_t bufsize, const CBMDefinition *def)
     size_t pos = (size_t)n;
     append_json_string(buf, bufsize, &pos, "docstring", def->docstring);
     append_json_string(buf, bufsize, &pos, "signature", def->signature);
+    append_json_string(buf, bufsize, &pos, "arities", def->arities);
     append_json_string(buf, bufsize, &pos, "return_type", def->return_type);
     append_json_string(buf, bufsize, &pos, "parent_class", def->parent_class);
     append_json_str_array(buf, bufsize, &pos, "decorators", def->decorators);
