@@ -4891,12 +4891,12 @@ static const ext_lang_entry_t ext_lang_table[] = {
     {".h", "C"},           {".cs", "C#"},          {".php", "PHP"},       {".lua", "Lua"},
     {".scala", "Scala"},   {".kt", "Kotlin"},      {".rb", "Ruby"},       {".sh", "Bash"},
     {".bash", "Bash"},     {".zig", "Zig"},        {".ex", "Elixir"},     {".exs", "Elixir"},
-    {".hs", "Haskell"},    {".ml", "OCaml"},       {".mli", "OCaml"},     {".html", "HTML"},
-    {".css", "CSS"},       {".yaml", "YAML"},      {".yml", "YAML"},      {".toml", "TOML"},
-    {".hcl", "HCL"},       {".tf", "HCL"},         {".sql", "SQL"},       {".erl", "Erlang"},
-    {".swift", "Swift"},   {".dart", "Dart"},      {".groovy", "Groovy"}, {".pl", "Perl"},
-    {".r", "R"},           {".scss", "SCSS"},      {".vue", "Vue"},       {".svelte", "Svelte"},
-    {NULL, NULL},
+    {".heex", "HEEx"},     {".leex", "HEEx"},      {".eex", "HEEx"},      {".hs", "Haskell"},
+    {".ml", "OCaml"},      {".mli", "OCaml"},      {".html", "HTML"},     {".css", "CSS"},
+    {".yaml", "YAML"},     {".yml", "YAML"},       {".toml", "TOML"},     {".hcl", "HCL"},
+    {".tf", "HCL"},        {".sql", "SQL"},        {".erl", "Erlang"},    {".swift", "Swift"},
+    {".dart", "Dart"},     {".groovy", "Groovy"},  {".pl", "Perl"},       {".r", "R"},
+    {".scss", "SCSS"},     {".vue", "Vue"},        {".svelte", "Svelte"}, {NULL, NULL},
 };
 
 static const char *ext_to_lang(const char *ext) {

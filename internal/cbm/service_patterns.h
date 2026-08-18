@@ -63,6 +63,16 @@ const char *cbm_service_pattern_http_method(const char *callee_name);
  * Returns NULL if not a known route registration method. */
 const char *cbm_service_pattern_route_method(const char *callee_name);
 
+/* Get the HTTP method for a BARE route-registration macro (e.g. "get" → "GET").
+ * Phoenix routers write `get "/wallets", WalletController, :index` — the callee
+ * is the unqualified macro name, which the dotted suffix table behind
+ * cbm_service_pattern_route_method (".get", "::get") cannot match. Matched
+ * EXACTLY, never as a suffix: a suffix rule here would turn every callee ending
+ * in "get" (widget, target, budget) into a route. Callers must gate this on the
+ * language — a bare `get(...)` means nothing in most languages.
+ * Returns NULL if the name is not a known bare route macro. */
+const char *cbm_service_pattern_route_macro_bare(const char *callee_name);
+
 /* Get the broker name for an async QN (e.g., "pubsub" from a Pub/Sub QN).
  * Returns NULL if not an async pattern. */
 const char *cbm_service_pattern_broker(const char *resolved_qn);

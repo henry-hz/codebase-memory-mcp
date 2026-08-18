@@ -54,6 +54,10 @@ clone zig         "tigerbeetle/tigerbeetle"        # 224K LOC (already large)
 clone haskell     "jgm/pandoc"                     # 433K LOC (already large)
 clone ocaml       "ocaml/dune"                     # 345K LOC (already large)
 clone elixir      "plausible/analytics"            # 677K LOC (already large)
+# NOTE: docs/BENCHMARK.md scores elixir on elixir-plug/plug, not this repo. That is deliberate and
+# not unique to elixir — ruby, bash, zig, haskell and erlang also differ between this script and
+# the benchmark. This corpus is a larger stress set; changing it changes what a future benchmark
+# run measures across all of those languages. See docs/elixir-boost.md §9.5.
 clone erlang      "emqx/emqx"                      # 500K+ LOC, MQTT broker
 clone objc        "realm/realm-cocoa"              # 200K+ LOC, database SDK
 clone swift       "Alamofire/Alamofire"            # 370K LOC (already large)

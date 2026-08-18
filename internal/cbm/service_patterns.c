@@ -854,6 +854,40 @@ const char *cbm_service_pattern_route_method(const char *callee_name) {
     return NULL;
 }
 
+/* Bare (unqualified) route-registration macros — Phoenix's router DSL.
+ * `get "/wallets", WalletController, :index` puts the bare macro name in the
+ * callee, so route_reg_suffixes above (every entry prefixed "." or "::") never
+ * matches. These are compared EXACTLY, never as a suffix: a suffix rule would
+ * classify "widget", "target" and "budget" as GET routes. */
+static const method_suffix_t route_reg_bare[] = {
+    {"get", "GET"},
+    {"post", "POST"},
+    {"put", "PUT"},
+    {"patch", "PATCH"},
+    {"delete", "DELETE"},
+    {"head", "HEAD"},
+    {"options", "OPTIONS"},
+    /* `live "/dashboard", DashboardLive` — LiveView mounts over GET. */
+    {"live", "GET"},
+    /* `resources "/users", UserController` expands to the whole CRUD set and
+     * `forward "/graphql", Absinthe.Plug` accepts any verb. */
+    {"resources", "ANY"},
+    {"forward", "ANY"},
+    {NULL, NULL},
+};
+
+const char *cbm_service_pattern_route_macro_bare(const char *callee_name) {
+    if (!callee_name) {
+        return NULL;
+    }
+    for (int i = 0; route_reg_bare[i].suffix != NULL; i++) {
+        if (strcmp(callee_name, route_reg_bare[i].suffix) == 0) {
+            return route_reg_bare[i].method;
+        }
+    }
+    return NULL;
+}
+
 const char *cbm_service_pattern_broker(const char *resolved_qn) {
     if (!resolved_qn) {
         return NULL;

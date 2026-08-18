@@ -537,6 +537,12 @@ passing. Total project tests: 2913 / 0 failed.
 > node/edge counts are therefore comparable across questions within this row but
 > not directly against other languages' 2026-03-01 counts.
 >
+> A 2026-08-18 follow-up audit found four defects this row cannot see, because none of the 12
+> questions ask about them: Phoenix routes, pub/sub channels, per-function complexity, and
+> similarity fingerprints were all absent or dead for Elixir. All four are fixed; see
+> `docs/elixir-boost.md` §10 for root causes and measured before/after. The counts in this row
+> predate those fixes and will rise on a re-run.
+>
 > Prior measurement, same repo, same questions: 870 nodes / 865 edges, 9.5/11 (86%).
 > On the code as it stood immediately before this change the same index produced
 > 989 nodes / 2,636 edges — so part of the gap to the 2026-03-01 numbers had

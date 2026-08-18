@@ -119,6 +119,7 @@ Re-vendoring from upstream must re-apply these.
 | haskell | 15 | tree-sitter/tree-sitter-haskell | `7fa19f195803` | VERIFIED-HELIX | ✅ |
 | hcl | 15 | tree-sitter-grammars/tree-sitter-hcl | `64ad62785d44` | MISMATCH | ✅ |
 | hlsl | 14 | tree-sitter-grammars/tree-sitter-hlsl | `bab9111922d5` | VERIFIED-NVIM | ✅ |
+| heex | 15 | phoenixframework/tree-sitter-heex | `5842537f734d` | UPSTREAM-OFFICIAL | ✅ |
 | html | 14 | tree-sitter/tree-sitter-html | `73a3947324f6` | VERIFIED-BOTH | ✅ |
 | hyprlang | 15 | tree-sitter-grammars/tree-sitter-hyprlang | `cecd6b748107` | VERIFIED-BOTH | ✅ |
 | ini | 15 | justinmk/tree-sitter-ini | `e4018b517613` | VERIFIED-BOTH | ✅ |

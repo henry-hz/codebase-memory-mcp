@@ -84,6 +84,11 @@ static const ext_entry_t EXT_TABLE[] = {
     {".ex", CBM_LANG_ELIXIR},
     {".exs", CBM_LANG_ELIXIR},
 
+    /* Phoenix templates. `.html.heex` ends in `.heex`, so one rule covers both. */
+    {".heex", CBM_LANG_HEEX},
+    {".leex", CBM_LANG_HEEX},
+    {".eex", CBM_LANG_HEEX},
+
     /* DotEnv */
     {".env", CBM_LANG_DOTENV},
 
@@ -705,6 +710,7 @@ static const char *LANG_NAMES[CBM_LANG_COUNT] = {
     [CBM_LANG_BASH] = "Bash",
     [CBM_LANG_ZIG] = "Zig",
     [CBM_LANG_ELIXIR] = "Elixir",
+    [CBM_LANG_HEEX] = "HEEx",
     [CBM_LANG_HASKELL] = "Haskell",
     [CBM_LANG_OCAML] = "OCaml",
     [CBM_LANG_OBJC] = "Objective-C",

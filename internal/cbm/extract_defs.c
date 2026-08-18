@@ -4825,6 +4825,134 @@ static const char *elixir_merge_arities(CBMArena *a, const char *existing, int a
     return cbm_arena_sprintf(a, "%s", buf);
 }
 
+/* True when node `n` spans exactly the text `lit`. Avoids an arena allocation
+ * per node in the complexity walk, which visits every node of every def. */
+static bool elixir_node_text_is(TSNode n, const char *source, const char *lit) {
+    if (ts_node_is_null(n)) {
+        return false;
+    }
+    uint32_t s = ts_node_start_byte(n);
+    uint32_t e = ts_node_end_byte(n);
+    size_t len = strlen(lit);
+    return (size_t)(e - s) == len && strncmp(source + s, lit, len) == 0;
+}
+
+/* Elixir has no branching NODE TYPES. `if`, `unless`, `case`, `cond`, `with`,
+ * `for`, `try` and `receive` are ordinary `call` nodes told apart only by the
+ * identifier in callee position, and every case/cond/fn/rescue arm is a
+ * `stab_clause`. lang_specs.c cannot express that — its Elixir branch table is
+ * `{"call"}`, which would score every function call as a decision — and
+ * cbm_compute_complexity matches on node type, so the generic path is unusable
+ * and Elixir functions were shipping complexity 0.
+ *
+ * Counted here, chosen so nothing is scored twice:
+ *   - every `stab_clause`         — one per case/cond/fn/rescue/catch/else arm
+ *   - `if` / `unless` / `with` / `for` calls, which have no arms of their own
+ *   - `&&` / `||` / `and` / `or`  — short-circuit operators
+ *   - `when`                      — a guard is a decision
+ * `case`/`cond`/`fn`/`try`/`receive` are deliberately NOT counted: their arms
+ * already are. Cognitive weighting is Campbell's, identical to the generic
+ * walk (+1 plus the current nesting depth). */
+static bool elixir_is_branch_call(TSNode call, const char *source) {
+    if (ts_node_child_count(call) == 0) {
+        return false;
+    }
+    TSNode callee = ts_node_child(call, 0);
+    if (ts_node_is_null(callee) || strcmp(ts_node_type(callee), "identifier") != 0) {
+        return false;
+    }
+    return elixir_node_text_is(callee, source, "if") ||
+           elixir_node_text_is(callee, source, "unless") ||
+           elixir_node_text_is(callee, source, "with") ||
+           elixir_node_text_is(callee, source, "for");
+}
+
+/* A comprehension (`for x <- xs, do: ...`) is Elixir's only real loop node.
+ * Enum.map/reduce iterate too, but they are plain function calls; counting them
+ * would make loop_depth meaningless, so they are left out. */
+static bool elixir_is_loop_call(TSNode call, const char *source) {
+    if (ts_node_child_count(call) == 0) {
+        return false;
+    }
+    TSNode callee = ts_node_child(call, 0);
+    return !ts_node_is_null(callee) && strcmp(ts_node_type(callee), "identifier") == 0 &&
+           elixir_node_text_is(callee, source, "for");
+}
+
+static bool elixir_is_branch_operator(TSNode node, const char *source) {
+    TSNode op = ts_node_child_by_field_name(node, TS_FIELD("operator"));
+    return elixir_node_text_is(op, source, "&&") || elixir_node_text_is(op, source, "||") ||
+           elixir_node_text_is(op, source, "and") || elixir_node_text_is(op, source, "or") ||
+           elixir_node_text_is(op, source, "when");
+}
+
+/* Complexity metrics for one Elixir def clause. Accumulated across clauses by
+ * the caller, because all clauses of a name collapse into a single Function. */
+static void elixir_compute_complexity(TSNode node, const char *source, cbm_complexity_t *out) {
+    enum { ELIXIR_CX_STACK_CAP = 4096 };
+    struct {
+        TSNode node;
+        int bdepth;
+        int ldepth;
+        int adepth;
+    } stack[ELIXIR_CX_STACK_CAP];
+    memset(out, 0, sizeof(*out));
+    int top = 0;
+    stack[top].node = node;
+    stack[top].bdepth = 0;
+    stack[top].ldepth = 0;
+    stack[top].adepth = 0;
+    top++;
+    while (top > 0) {
+        int cur = --top;
+        TSNode n = stack[cur].node;
+        int bdepth = stack[cur].bdepth;
+        int ldepth = stack[cur].ldepth;
+        int adepth = stack[cur].adepth;
+        const char *kind = ts_node_type(n);
+        bool is_branch = false;
+        if (strcmp(kind, "stab_clause") == 0) {
+            is_branch = true;
+        } else if (strcmp(kind, "call") == 0) {
+            is_branch = elixir_is_branch_call(n, source);
+        } else if (strcmp(kind, "binary_operator") == 0) {
+            is_branch = elixir_is_branch_operator(n, source);
+        }
+        int child_b = bdepth;
+        int child_l = ldepth;
+        /* `conn.assigns.user` nests as dot(dot(conn)), so consecutive `dot`
+         * nodes deepen the chain and anything else resets it. */
+        int child_a = 0;
+        if (strcmp(kind, "dot") == 0) {
+            child_a = adepth + 1;
+            if (child_a > out->max_access_depth) {
+                out->max_access_depth = child_a;
+            }
+        }
+        if (is_branch) {
+            out->cyclomatic++;
+            out->cognitive += 1 + bdepth;
+            child_b = bdepth + 1;
+        }
+        if (strcmp(kind, "call") == 0 && elixir_is_loop_call(n, source)) {
+            out->loop_count++;
+            int d = ldepth + 1;
+            if (d > out->loop_depth) {
+                out->loop_depth = d;
+            }
+            child_l = d;
+        }
+        uint32_t nc = ts_node_child_count(n);
+        for (int i = (int)nc - 1; i >= 0 && top < ELIXIR_CX_STACK_CAP; i--) {
+            stack[top].node = ts_node_child(n, (uint32_t)i);
+            stack[top].bdepth = child_b;
+            stack[top].ldepth = child_l;
+            stack[top].adepth = child_a;
+            top++;
+        }
+    }
+}
+
 // Handle Elixir def/defp/defmacro/defmacrop/defguard/defguardp/defdelegate.
 // `module_qn` is the enclosing defmodule's QN, or NULL at file scope.
 static void extract_elixir_func_def(CBMExtractCtx *ctx, TSNode node, const char *macro,
@@ -4868,14 +4996,30 @@ static void extract_elixir_func_def(CBMExtractCtx *ctx, TSNode node, const char 
      * get_code_snippet returns every clause, and accumulates the arity set. The
      * defs array holds one entry per unique QN, so this scan stays short even on
      * clause-heavy files (Plug.Conn.Status: hundreds of clauses, one QN). */
+    cbm_complexity_t cx;
+    elixir_compute_complexity(node, ctx->source, &cx);
+
     for (int i = ctx->result->defs.count - 1; i >= 0; i--) {
         CBMDefinition *prev = &ctx->result->defs.items[i];
         if (prev->label && strcmp(prev->label, "Function") == 0 && prev->qualified_name &&
             strcmp(prev->qualified_name, qn) == 0) {
             if (end > prev->end_line) {
                 prev->end_line = end;
+                prev->lines = (int)(prev->end_line - prev->start_line + TS_LINE_OFFSET);
             }
             prev->arities = elixir_merge_arities(a, prev->arities, arity);
+            /* One Function, many clauses: a clause's decisions belong to the
+             * whole function, so counts add and the depth maxima take the
+             * deepest clause. */
+            prev->complexity += cx.cyclomatic;
+            prev->cognitive += cx.cognitive;
+            prev->loop_count += cx.loop_count;
+            if (cx.loop_depth > prev->loop_depth) {
+                prev->loop_depth = cx.loop_depth;
+            }
+            if (cx.max_access_depth > prev->max_access_depth) {
+                prev->max_access_depth = cx.max_access_depth;
+            }
             return;
         }
     }
@@ -4895,6 +5039,19 @@ static void extract_elixir_func_def(CBMExtractCtx *ctx, TSNode node, const char 
         def.signature = cbm_node_text(a, params, ctx->source);
     }
     def.arities = elixir_merge_arities(a, NULL, arity);
+    def.lines = (int)(def.end_line - def.start_line + TS_LINE_OFFSET);
+    def.complexity = cx.cyclomatic;
+    def.cognitive = cx.cognitive;
+    def.loop_count = cx.loop_count;
+    def.loop_depth = cx.loop_depth;
+    def.max_access_depth = cx.max_access_depth;
+    /* Fingerprint off the body, not the whole def call: including the head
+     * would make every clause of a name look alike. Elixir was the only
+     * language emitting Functions with no fingerprint at all, so it never
+     * appeared in similarity/duplicate results. Must run after `lines` — the
+     * AST profile reads it. */
+    TSNode fp_body = cbm_find_child_by_kind(node, "do_block");
+    compute_fingerprint(ctx, &def, ts_node_is_null(fp_body) ? node : fp_body);
     cbm_defs_push(&ctx->result->defs, a, def);
 }
 

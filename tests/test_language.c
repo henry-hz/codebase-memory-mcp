@@ -149,6 +149,13 @@ TEST(lang_ext_exs) {
     ASSERT_EQ(cbm_language_for_extension(".exs"), CBM_LANG_ELIXIR);
     PASS();
 }
+/* `.html.heex` ends in `.heex`, so the single suffix rule covers both forms. */
+TEST(lang_ext_heex) {
+    ASSERT_EQ(cbm_language_for_extension(".heex"), CBM_LANG_HEEX);
+    ASSERT_EQ(cbm_language_for_extension(".leex"), CBM_LANG_HEEX);
+    ASSERT_EQ(cbm_language_for_extension(".eex"), CBM_LANG_HEEX);
+    PASS();
+}
 TEST(lang_ext_haskell) {
     ASSERT_EQ(cbm_language_for_extension(".hs"), CBM_LANG_HASKELL);
     PASS();
@@ -1094,6 +1101,7 @@ SUITE(language) {
     RUN_TEST(lang_ext_zig);
     RUN_TEST(lang_ext_elixir);
     RUN_TEST(lang_ext_exs);
+    RUN_TEST(lang_ext_heex);
     RUN_TEST(lang_ext_haskell);
     RUN_TEST(lang_ext_ocaml);
     RUN_TEST(lang_ext_mli);

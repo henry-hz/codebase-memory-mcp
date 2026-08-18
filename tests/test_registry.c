@@ -6,6 +6,7 @@
  */
 #include "test_framework.h"
 #include "pipeline/pipeline.h"
+#include "service_patterns.h" // cbm_service_pattern_route_macro_bare
 
 #include <stdlib.h>
 #include <string.h>
@@ -892,6 +893,29 @@ TEST(resolve_import_map_alias_with_suffix_hits_method) {
     PASS();
 }
 
+/* Phoenix routers use BARE macros (`get "/wallets", ...`), which the dotted
+ * suffix table can never match. The bare table must be EXACT: matching it as a
+ * suffix the way route_reg_suffixes does would classify "widget", "target" and
+ * "budget" as GET routes. */
+TEST(elixir_route_macro_bare_is_exact_match) {
+    ASSERT_STR_EQ("GET", cbm_service_pattern_route_macro_bare("get"));
+    ASSERT_STR_EQ("POST", cbm_service_pattern_route_macro_bare("post"));
+    ASSERT_STR_EQ("DELETE", cbm_service_pattern_route_macro_bare("delete"));
+    ASSERT_STR_EQ("GET", cbm_service_pattern_route_macro_bare("live"));
+    ASSERT_STR_EQ("ANY", cbm_service_pattern_route_macro_bare("resources"));
+    ASSERT_STR_EQ("ANY", cbm_service_pattern_route_macro_bare("forward"));
+    /* Suffix matches must NOT fire. */
+    ASSERT_NULL(cbm_service_pattern_route_macro_bare("widget"));
+    ASSERT_NULL(cbm_service_pattern_route_macro_bare("target"));
+    ASSERT_NULL(cbm_service_pattern_route_macro_bare("budget"));
+    ASSERT_NULL(cbm_service_pattern_route_macro_bare("compost"));
+    /* Qualified callees stay the dotted table's job. */
+    ASSERT_NULL(cbm_service_pattern_route_macro_bare("router.get"));
+    ASSERT_NULL(cbm_service_pattern_route_macro_bare(""));
+    ASSERT_NULL(cbm_service_pattern_route_macro_bare(NULL));
+    PASS();
+}
+
 SUITE(registry) {
     /* FQN */
     RUN_TEST(fqn_simple);
@@ -962,4 +986,5 @@ SUITE(registry) {
     RUN_TEST(tsjs_suppress_keeps_high_confidence_and_non_methods);
     RUN_TEST(elixir_stdlib_suppress_drops_weak_matches_only);
     RUN_TEST(elixir_scope_local_override_upgrades_bare_calls);
+    RUN_TEST(elixir_route_macro_bare_is_exact_match);
 }

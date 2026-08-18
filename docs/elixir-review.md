@@ -346,3 +346,100 @@ methodology section is a false accusation about someone else's work and must com
 4. A yes/no on each decision in §3.2, with reasoning where you disagree.
 5. Anything I marked "verified" that you find I did not actually verify.
 
+---
+
+## 10. Review response (2026-08-18)
+
+Answering §9 in order. Everything below was measured, not read: the unit gate was rerun, a real
+829-file Phoenix application was indexed with a freshly built binary, and each claim was checked
+against the vendored grammar's own field and symbol tables.
+
+**First, a correction that invalidates any measurement taken through the MCP server.** The
+installed binary at `~/.local/bin/codebase-memory-mcp` is dated Aug 3, which predates all three
+Elixir commits. An index taken through it shows zero Interfaces and zero IMPLEMENTS on a codebase
+with 14 `@behaviour` declarations, which looks exactly like a catastrophic regression and is not
+one. Anyone re-running these numbers must build first and drive `build/c/codebase-memory-mcp`
+directly.
+
+### 9.1 — §5's daemon_runtime failure
+
+No verdict from here; the attribution stands as written. The failing test touches no file in this
+change, and the 2×2 matrix in §5 is the right way to have tested it. Independently: this host is
+known to fail `daemon_runtime` and the `subprocess` bounded-wait tests for environmental reasons,
+which is consistent with the flake reading. Not re-litigated.
+
+### 9.2 — Real defects, ranked
+
+Four, all confirmed at runtime and all now fixed. Details and measured before/after in
+`docs/elixir-boost.md` §10; the short version:
+
+1. **`first_string_arg` was never populated for any Elixir call.** `extract_calls.c` looked up an
+   `arguments` FIELD that tree-sitter-elixir does not define. Failing input: any
+   `get "/wallets", WalletController, :index`. Consequence: zero Phoenix Routes, no HTTP/async
+   service URLs, no pub/sub topics. This is the single highest-impact defect in the Elixir path
+   and it predates the change.
+2. **Channel extraction was entirely dead code.** Same missing field in `extract_channels.c`, plus
+   a dispatch on a `"def"` NODE TYPE that does not exist in the grammar. Failing input:
+   `Phoenix.PubSub.broadcast(Acme.PubSub, "user:created", p)` and `def handle_in("new_msg", …)`.
+3. **Bare Phoenix router macros matched no route suffix.** Every `route_reg_suffixes` entry is
+   prefixed `.` or `::`, so callee `get` matched nothing. Failing input: any `router.ex`.
+4. **Elixir Functions carried no complexity, no fingerprint and no `lines`.** Failing input: any
+   `.ex` file — 2 of 4,504 Functions scored above zero. `src/mcp/mcp.c` advertises the opposite.
+
+None of these are regressions introduced by this change; (3) and (4) are gaps the change left in
+place, (1) and (2) predate it. The benchmark could not see any of them because its 12 questions
+ask about definitions, QNs, calls, imports and behaviours — never about routes, channels,
+complexity or similarity.
+
+### 9.3 — §4(i): can the `pass_pkgmap.c` reordering affect another language?
+
+It cannot, and the guard is the reason. The new full-dotted-path candidate is inserted only when
+`module_like_label()` accepts the definition's label, which admits Module/Class/Interface-shaped
+nodes and excludes Function. The languages at risk were the ones whose *functions* carry dotted
+names — Lua (`a.b.c = function() end`), R (`pkg.fn`) — and in both the dotted name belongs to a
+Function node, which the guard rejects, so the candidate is never inserted and ordering is
+unchanged. Go, Rust, Java, PHP and Ruby never produce dotted definition names at all.
+
+To be explicit about the strength of this answer: it is a code-reading argument plus the existing
+suite, not an A/B measurement. Establishing the latter would mean indexing a Lua and an R corpus at
+the commit before `e59b0e5b` and again at HEAD and diffing the IMPORTS edges, which was not done.
+
+### 9.4 — §3.2 decisions (a)–(h)
+
+Yes to all eight, with one qualification.
+
+- **(a) arity not in the QN** — yes. `registry.c simple_name()` joins on the last dot segment; a
+  `/2` suffix would make every callee miss. The `arities` property is the right home.
+- **(b) no node for `defstruct`/`defexception`/`defoverridable`** — yes as scoped. They name
+  nothing of their own. Their *fields* would be genuine new content, and remain unbuilt.
+- **(c) `Interface` for behaviours** — yes. It is what makes IMPLEMENTS work, and it is measurably
+  correct: 14 `@behaviour` declarations produced exactly 14 IMPLEMENTS edges.
+- **(d) descent into any `do_block`** — yes. The stack growth is bounded by arena doubling and the
+  reversal is correct; the alternative (enumerating containers) would have missed `quote do`, which
+  is how most of Phoenix defines functions.
+- **(e) `@name` Variables and `@` in the QN** — yes. The `@` is what stops an attribute colliding
+  with a same-named function in the same module, and nothing downstream splits on it.
+- **(f) whole-tree import walker** — yes, with the qualification already stated in §3.2: it is a
+  deliberate superset, since an `alias` inside a function body becomes a file-level IMPORTS edge.
+  Acceptable, because Elixir aliases are lexically scoped and a superset costs recall, not
+  correctness.
+- **(g) `parent_class` on Functions** — yes.
+- **(h) changed `is_exported` semantics** — yes; `defp`/`defmacrop`/`defguardp` is the correct
+  private set.
+
+### 9.5 — Things marked "verified" that were not
+
+Two, both minor and both now corrected in the docs:
+
+- §9.4 of `docs/elixir-boost.md` said "the 8 tests from §6". Commit `a6380ae1` added 5 more
+  extraction tests and 2 registry tests without updating either document. The tree now carries 17
+  extraction + 3 registry Elixir tests.
+- §8's resolution mix (`unique_name` 946 / `suffix_match` 509 / `qualified_suffix` 96 /
+  `import_map` 24) is stale, and stale in the change's favour: re-measured on the same benchmark
+  index it is `unique_name` 481 / `same_module` 459 / `suffix_match` 303 / `qualified_suffix` 96 /
+  `field_type_hint` 29 / `import_map` 24. The 509 low-confidence edges §8 worries about are now
+  303, and 459 edges resolve at `same_module` confidence that previously did not exist — the
+  `cbm_registry_scope_local_override` work landed better than the doc claims.
+
+The `docs/BENCHMARK.md` scoring-arithmetic claim in §8 was not re-derived here and remains open.
+

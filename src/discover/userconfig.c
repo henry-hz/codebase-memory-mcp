@@ -70,6 +70,7 @@ static const lang_name_entry_t LANG_NAME_TABLE[] = {
     {"sh", CBM_LANG_BASH},
     {"zig", CBM_LANG_ZIG},
     {"elixir", CBM_LANG_ELIXIR},
+    {"heex", CBM_LANG_HEEX},
     {"haskell", CBM_LANG_HASKELL},
     {"ocaml", CBM_LANG_OCAML},
     {"objective-c", CBM_LANG_OBJC},

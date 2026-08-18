@@ -1750,6 +1750,9 @@ static void emit_route_registration(cbm_gbuf_t *gbuf, const cbm_gbuf_node_t *sou
                                     const cbm_registry_t *registry, const cbm_gbuf_t *main_gbuf,
                                     const char **ik, const char **iv, int ic) {
     const char *method = cbm_service_pattern_route_method(call->callee_name);
+    if (!method) {
+        method = cbm_service_pattern_route_macro_bare(call->callee_name); /* bare Phoenix macro */
+    }
     char rqn[CBM_ROUTE_QN_SIZE];
     char cpath[CBM_SZ_256];
     snprintf(rqn, sizeof(rqn), "__route__%s__%s", method ? method : "ANY",
@@ -2240,6 +2243,26 @@ static void resolve_file_calls(resolve_ctx_t *rc, resolve_worker_state_t *ws, CB
                                   memory_order_relaxed);
         if (!source_node) {
             continue;
+        }
+
+        /* Bare Phoenix router macro — mirrors the sequential pass
+         * (pass_calls.c). Classified before resolution because a same-named
+         * project function would otherwise win and swallow the route. Gated to
+         * Elixir; see cbm_service_pattern_route_macro_bare. */
+        if (lang == CBM_LANG_ELIXIR && call->first_string_arg && call->first_string_arg[0] == '/' &&
+            cbm_service_pattern_route_macro_bare(call->callee_name) != NULL) {
+            const char *handler_ref = NULL;
+            const char *route_path = find_route_path_in_args(call, &handler_ref);
+            if (route_path) {
+                /* Straight to the emitter, not emit_service_edge: that one
+                 * re-derives the service kind from the resolved QN and the
+                 * DOTTED suffix table, neither of which knows a bare macro, so
+                 * the route would be silently downgraded to a plain call. */
+                emit_route_registration(ws->local_edge_buf, source_node, call, route_path,
+                                        handler_ref, module_qn, rc->registry, rc->main_gbuf,
+                                        imp_keys, imp_vals, imp_count);
+                continue;
+            }
         }
 
         /* LSP-resolved calls take precedence over registry textual matching.

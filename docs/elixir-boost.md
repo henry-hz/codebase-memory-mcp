@@ -473,7 +473,7 @@ the base node's label, so a module declaring `@callback` is labelled `Interface`
 | Step 2 (resolution) | `src/pipeline/pass_pkgmap.c` | full dotted path tried first as an import candidate; new `cbm_pipeline_find_dotted_module()` |
 | Step 2 (resolution) | `pass_calls.c`, `pass_usages.c`, `pass_semantic.c` | dotted-module fallback in each `build_import_map` fast path |
 | Step 6 | `internal/cbm/extract_calls.c` | bare pipe callee (`conn \|> halt`) |
-| Tests | `tests/test_extraction.c` | the 8 tests from §6, plus `call_enclosing_qn()` asserting the def-side and call-scope QNs agree |
+| Tests | `tests/test_extraction.c` | the 8 tests from §6, plus `call_enclosing_qn()` asserting the def-side and call-scope QNs agree. A later review pass (`a6380ae1`) added 5 more here and 2 in `tests/test_registry.c`; §10 adds 3 more here and 1 more there, for **17 extraction + 3 registry** today |
 
 ### 9.5 Verification
 
@@ -522,3 +522,140 @@ languages — ruby (`rails/rails` vs `sinatra/sinatra`), bash (`ohmyzsh` vs `bat
 The script is a deliberately larger stress corpus, not a stale copy of the scored one. Changing it
 silently changes what a future benchmark run measures across every one of those languages, which
 belongs to whoever owns the benchmark corpus, not to this work.
+
+---
+
+## 10. Follow-up audit (2026-08-18)
+
+The 12/12 benchmark score is real, but it only measures what the questions ask: definitions,
+QNs, calls, imports and behaviours. Four things Elixir users would expect were absent or broken,
+none of them visible to the benchmark. All four are fixed; the root cause of three was the same.
+
+### 10.1 One root cause: the missing `arguments` field
+
+tree-sitter-elixir attaches **no field name** to a call's arguments node. Its entire field set is
+`key, left, operand, operator, quoted_start, quoted_end, right, target, value`
+(`internal/cbm/vendored/grammars/elixir/parser.c`). `cbm_elixir_call_args()` exists precisely
+because of this — but only the *def* side ever used it. Two other places kept calling
+`ts_node_child_by_field_name(node, "arguments")`, which is always null for Elixir:
+
+- `internal/cbm/extract_calls.c` — so `call.first_string_arg` was **never populated for any Elixir
+  call**. That silently disabled every downstream signal keyed off a call's string argument:
+  Phoenix routes, HTTP/async service URLs, and pub/sub topics.
+- `internal/cbm/extract_channels.c` — so `elixir_emit_second_arg()` returned early every time and
+  **no Phoenix.PubSub or Phoenix.Channel channel was ever extracted**.
+
+Both now go through `cbm_elixir_call_args()`.
+
+### 10.2 Channel listeners dispatched on a node type that does not exist
+
+`extract_channels_elixir()` tested `strcmp(kind, "def") == 0`. Elixir has no `def` node type — defs
+are `call` nodes — so `elixir_process_function_def()` was unreachable, and it also read `name` and
+`parameters` fields the grammar does not define. It now matches `call` +
+`cbm_elixir_is_func_macro()` and unwraps the head with `cbm_elixir_def_head()` /
+`cbm_elixir_def_name()`, so guarded clauses (`def handle_in(e, p, s) when …`) are caught too.
+
+### 10.3 Phoenix routes: bare macros matched no suffix
+
+Every entry in `route_reg_suffixes` (`internal/cbm/service_patterns.c`) is prefixed `.` or `::`
+(`.get`, `::get`, `.MapGet`). Phoenix router macros are **bare** — `get "/wallets",
+WalletController, :index` — so the callee is exactly `get` and
+`cbm_service_pattern_route_method()` returned NULL. A Phoenix app minted **zero** Route nodes.
+
+Added `cbm_service_pattern_route_macro_bare()`: a small EXACT-match table (`get`, `post`, `put`,
+`patch`, `delete`, `head`, `options`, `live`, `resources`, `forward`). Exact, not suffix — a suffix
+rule would classify `widget`, `target` and `budget` as GET routes. It is consulted from an
+Elixir-gated branch in **both** venues (`pass_calls.c`, `pass_parallel.c`) placed *before*
+resolution, because a project function named `get` would otherwise win and swallow the route.
+`extract_handler_arg()` also learned Elixir's `alias`/`dot` handler nodes, without which no route
+got a HANDLES edge.
+
+### 10.4 No complexity, no fingerprint, no line count
+
+`walk_defs` short-circuits for Elixir, and `extract_elixir_func_def()` called neither
+`set_def_complexity()` nor `compute_fingerprint()` and never set `lines`. Every Elixir Function
+carried `complexity = 0` and no fingerprint, so complexity/bottleneck queries and `SIMILAR_TO`
+were blind to Elixir — while `src/mcp/mcp.c` advertises that "every Function and Method node
+carries queryable complexity properties".
+
+The generic path cannot be reused: `cbm_compute_complexity()` matches on node **type**, and Elixir
+control flow is `call` nodes distinguished by callee text plus `stab_clause` arms. (This is also
+why `elixir_branch_types = {"call"}` in `lang_specs.c` was never usable — it would score every
+function call as a decision.) `elixir_compute_complexity()` in `extract_defs.c` is the Elixir-shaped
+equivalent, same Campbell cognitive weighting, counting each `stab_clause`, each
+`if`/`unless`/`with`/`for` call, each `&&`/`||`/`and`/`or`, and each `when` guard — and
+deliberately *not* `case`/`cond`/`fn`/`try`/`receive`, whose arms are already counted. Clause
+metrics accumulate, since all clauses of a name collapse into one Function.
+
+### 10.5 Measured effect
+
+Fresh index of a real 829-file Phoenix application:
+
+| | before | after |
+|---|---|---|
+| Route nodes | 0 | 180 |
+| HANDLES edges | 0 | 153 |
+| Functions with `complexity > 0` | 2 / 4,504 | 2,023 / 4,504 |
+| Functions with `lines > 0` | 24 | 4,502 |
+| SIMILAR_TO edges | 7 | 414 |
+| `.heex` files indexed | 0 | 7 |
+| component CALLS from templates | 0 | 20 |
+
+Spot-checked by hand: `Bank.Clients.apply_client_filters` scores 33, which is exactly its 14
+`stab_clause` arms + 6 `when` guards + 6 `and` + 1 `if` + 5 `or` + 1 `and`.
+
+Channels are green on a synthetic fixture (`Phoenix.PubSub.broadcast`/`subscribe`, `handle_in/3`
+including a guarded clause, bare `push`/`broadcast`). The Phoenix app above still reports zero
+channels — correctly, because it computes every topic (`topic(tenant_id, suffix)`) rather than
+writing a literal, and the extractor only records literal topic names.
+
+### 10.6 HEEx templates
+
+`.heex` / `.eex` / `.leex` were not indexed at all — no extension mapping, no vendored grammar — so
+for a LiveView app the entire template layer was invisible. Added:
+
+- `phoenixframework/tree-sitter-heex` @ `5842537f734d` (ABI 15, no external scanner) vendored to
+  `internal/cbm/vendored/grammars/heex/`, compiled through `internal/cbm/grammar_heex.c` and
+  recorded in `MANIFEST.md`
+- `CBM_LANG_HEEX` appended to the enum in `internal/cbm/cbm.h` (appended, not inserted, so no
+  existing language's numbering moves), a `lang_specs.c` row, `.heex`/`.leex`/`.eex` in
+  `src/discover/language.c` and `src/store/store.c`, and `heex` in `src/discover/userconfig.c`
+- `extract_heex_callee()` in `extract_calls.c`. A template *defines* nothing; its graph value is
+  the Elixir function components it renders. `<.button>` is a `component_name` whose text is
+  `.button` — the leading dot means "imported into this template's module", so it is stripped and
+  the bare name left for the registry (which resolves it to e.g.
+  `MyAppWeb.CoreComponents.button`). `<MyApp.Components.table>` keeps its dotted form and resolves
+  via `qualified_suffix`. The closing tag of a paired component carries its own `component_name`
+  and is deliberately skipped, or every paired component would be counted twice.
+
+Scope: component references only. `{...}` / `<%= %>` interpolated Elixir expressions, `:let`/slot
+bindings and `phx-*` event names are not extracted.
+
+### 10.7 Still open
+- **Scattered-clause span inflation.** The multi-clause merge assumes clauses are adjacent.
+  `Bank.Identity.get_role!` has clauses at lines 887 and 1750, so the node spans 887–1752 and
+  `get_code_snippet` returns ~865 unrelated lines. Measured: 150 of 4,118 `.ex` Functions (3.6%)
+  span >60 lines, 25 span >200, 1 spans >500.
+- **ASan still never ran** (§9.5's caveat is unchanged on this host). The gate below ran under
+  UBSan with Apple clang, per §9.5's documented workaround.
+
+### 10.8 Gate
+
+```
+make -f Makefile.cbm test-focused TEST_SUITES="extraction registry language" \
+     CC=/usr/bin/clang CXX=/usr/bin/clang++ SANITIZE="-fsanitize=undefined -fno-omit-frame-pointer"
+                                                           # 565 passed, 0 failed
+make -f Makefile.cbm test-par (same flags)                 # 6844 passed, 1 failed, 4 skipped
+```
+
+The single failure is §9.5's `daemon_runtime_disconnect_cancels_blocked_non_index_child_and_preserves_other_session`
+(`tests/test_daemon_runtime.c:3711`), unchanged and unrelated. Baseline before this work was
+6831/1/4; the delta is the 13 tests added since. `lang_contract` (37), `pipeline` (237),
+`grammar_regression`, `grammar_labels`, `grammar_imports` and the CALLS-breadth contract across 53
+languages are all clean — the shared files touched here (`extract_calls.c`, `service_patterns.c`,
+`pass_calls.c`, `pass_parallel.c`) caused no cross-language regression.
+
+Elixir tests now: **18 in `tests/test_extraction.c`** (14 existing + channels, router args,
+complexity, and the HEEx component test) and **3 in `tests/test_registry.c`**, plus a `.heex`
+extension row in `tests/test_language.c`.
+

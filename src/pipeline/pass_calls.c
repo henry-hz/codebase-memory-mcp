@@ -204,6 +204,13 @@ static void handle_route_registration(cbm_pipeline_ctx_t *ctx, const CBMCall *ca
                                       const cbm_gbuf_node_t *source_node, const char *module_qn,
                                       const char **imp_keys, const char **imp_vals, int imp_count) {
     const char *method = cbm_service_pattern_route_method(call->callee_name);
+    if (!method) {
+        /* Bare Phoenix router macro (`get "/wallets", ...`) — the dotted suffix
+         * table cannot name it, so without this every Phoenix route would be
+         * filed as "ANY". Only reached once the caller already classified this
+         * call as a route registration. */
+        method = cbm_service_pattern_route_macro_bare(call->callee_name);
+    }
     char route_qn[CBM_ROUTE_QN_SIZE];
     char cpath[CBM_SZ_256];
     snprintf(route_qn, sizeof(route_qn), "__route__%s__%s", method ? method : "ANY",
@@ -467,6 +474,20 @@ static int resolve_single_call(cbm_pipeline_ctx_t *ctx, CBMCall *call,
     const cbm_gbuf_node_t *source_node = calls_find_source(ctx, rel, call->enclosing_func_qn);
     if (!source_node) {
         return 0;
+    }
+
+    /* Phoenix router macros are BARE (`get "/wallets", WalletController, :index`),
+     * so neither the resolved-QN route library table (Phoenix.Router never
+     * resolves in-tree) nor the dotted callee suffix table can see them, and a
+     * Phoenix app minted zero Route nodes. Classify here, BEFORE resolution:
+     * a bare route macro whose first string argument is path-shaped is a route
+     * registration no matter what a same-named project function would resolve
+     * to (real routers define `get`-named helpers all the time). Gated to Elixir
+     * — a bare `get(...)` carries no such meaning elsewhere. */
+    if (lang == CBM_LANG_ELIXIR && call->first_string_arg && call->first_string_arg[0] == '/' &&
+        cbm_service_pattern_route_macro_bare(call->callee_name) != NULL) {
+        handle_route_registration(ctx, call, source_node, module_qn, imp_keys, imp_vals, imp_count);
+        return SKIP_ONE;
     }
 
     /* LSP-resolved calls take precedence over registry-textual matching.

@@ -901,8 +901,19 @@ static void elixir_emit_second_arg(CBMExtractCtx *ctx, TSNode call, TSNode args,
     }
 }
 
-static void elixir_process_call(CBMExtractCtx *ctx, TSNode call) {
+/* The callee of an Elixir `call`. The grammar labels it `target`, but
+ * extract_defs.c reads child(0) for the same thing; keep both so a production
+ * that only carries the inherited field still resolves. */
+static TSNode elixir_call_target(TSNode call) {
     TSNode target = ts_node_child_by_field_name(call, TS_FIELD("target"));
+    if (ts_node_is_null(target) && ts_node_child_count(call) > 0) {
+        target = ts_node_child(call, 0);
+    }
+    return target;
+}
+
+static void elixir_process_call(CBMExtractCtx *ctx, TSNode call) {
+    TSNode target = elixir_call_target(call);
     if (ts_node_is_null(target)) {
         return;
     }
@@ -911,7 +922,11 @@ static void elixir_process_call(CBMExtractCtx *ctx, TSNode call) {
         return;
     }
 
-    TSNode args = ts_node_child_by_field_name(call, TS_FIELD("arguments"));
+    /* tree-sitter-elixir gives a call's arguments node NO field name, so the
+     * generic field lookup used everywhere else returns null here and every
+     * channel below was silently skipped. cbm_elixir_call_args is the shared
+     * second-child fallback (see helpers.c). */
+    TSNode args = cbm_elixir_call_args(call);
 
     if (strstr(target_text, "PubSub.broadcast") || strstr(target_text, "PubSub.local_broadcast")) {
         elixir_emit_second_arg(ctx, call, args, "phoenix_pubsub", CBM_CHANNEL_EMIT);
@@ -927,18 +942,21 @@ static void elixir_process_call(CBMExtractCtx *ctx, TSNode call) {
     }
 }
 
-/* Detect handle_in("event", payload, socket) — Phoenix Channel listener */
-static void elixir_process_function_def(CBMExtractCtx *ctx, TSNode func_def) {
-    TSNode name_node = ts_node_child_by_field_name(func_def, TS_FIELD("name"));
-    if (ts_node_is_null(name_node)) {
+/* Detect handle_in("event", payload, socket) — Phoenix Channel listener.
+ * `def_call` is the `call` node of a def* macro: Elixir has no `def` node type
+ * and no `name`/`parameters` fields, so the head is unwrapped with the same
+ * helpers the def side uses (guards included: `def handle_in(e, p, s) when …`). */
+static void elixir_process_function_def(CBMExtractCtx *ctx, TSNode def_call) {
+    TSNode args = cbm_elixir_call_args(def_call);
+    if (ts_node_is_null(args) || ts_node_named_child_count(args) == 0) {
         return;
     }
-    char *name = cbm_node_text(ctx->arena, name_node, ctx->source);
+    TSNode head = cbm_elixir_def_head(ts_node_named_child(args, 0), ctx->source);
+    TSNode params = {0};
+    const char *name = cbm_elixir_def_name(ctx->arena, head, ctx->source, &params);
     if (!name || strcmp(name, "handle_in") != 0) {
         return;
     }
-    /* First parameter is the event name pattern */
-    TSNode params = ts_node_child_by_field_name(func_def, TS_FIELD("parameters"));
     if (ts_node_is_null(params)) {
         return;
     }
@@ -952,7 +970,7 @@ static void elixir_process_function_def(CBMExtractCtx *ctx, TSNode func_def) {
         val = literal_from_first_child(ctx, first_param);
     }
     if (val) {
-        push_channel(ctx, val, "phoenix_channel", CBM_CHANNEL_LISTEN, func_def);
+        push_channel(ctx, val, "phoenix_channel", CBM_CHANNEL_LISTEN, def_call);
     }
 }
 
@@ -964,10 +982,18 @@ static void extract_channels_elixir(CBMExtractCtx *ctx) {
     while (stack.count > 0) {
         TSNode node = ts_nstack_pop(&stack);
         const char *kind = ts_node_type(node);
+        /* Everything in Elixir is a `call` — including `def`. The old dispatch
+         * tested for a "def" node type that the grammar does not have, so the
+         * handle_in listener branch was unreachable. */
         if (strcmp(kind, "call") == 0) {
-            elixir_process_call(ctx, node);
-        } else if (strcmp(kind, "def") == 0) {
-            elixir_process_function_def(ctx, node);
+            TSNode target = elixir_call_target(node);
+            char *macro =
+                ts_node_is_null(target) ? NULL : cbm_node_text(ctx->arena, target, ctx->source);
+            if (cbm_elixir_is_func_macro(macro)) {
+                elixir_process_function_def(ctx, node);
+            } else {
+                elixir_process_call(ctx, node);
+            }
         }
         uint32_t count = ts_node_child_count(node);
         for (int i = (int)count - SKIP_ONE; i >= 0; i--) {

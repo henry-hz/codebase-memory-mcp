@@ -992,6 +992,18 @@ static CBMDefinition *find_def_qn(CBMFileResult *r, const char *qn) {
     return NULL;
 }
 
+/* True when a channel with this name/transport/direction was extracted. */
+static int has_channel(CBMFileResult *r, const char *name, const char *transport,
+                       CBMChannelDirection dir) {
+    for (int i = 0; i < r->channels.count; i++) {
+        const CBMChannel *c = &r->channels.items[i];
+        if (c->channel_name && strcmp(c->channel_name, name) == 0 && c->transport &&
+            strcmp(c->transport, transport) == 0 && c->direction == dir)
+            return 1;
+    }
+    return 0;
+}
+
 /* True when a usage of `ref` was recorded with the given enclosing QN. */
 static int has_usage_from(CBMFileResult *r, const char *ref, const char *enclosing_qn) {
     for (int i = 0; i < r->usages.count; i++) {
@@ -1366,6 +1378,132 @@ TEST(elixir_attr_calls_and_usage) {
     ASSERT(has_call(r, "compute_max"));
     ASSERT(has_def(r, "Variable", "@timeout"));
     ASSERT(has_usage_from(r, "@timeout", "t.cfg2.Cfg2.timeout"));
+    cbm_free_result(r);
+    PASS();
+}
+
+/* Phoenix pub/sub and channel listeners. Both branches were unreachable dead
+ * code: the emit side looked up an "arguments" FIELD that tree-sitter-elixir
+ * does not define, and the listener side dispatched on a "def" NODE TYPE that
+ * does not exist (Elixir defs are `call` nodes), so a Phoenix app produced
+ * zero Channel nodes. */
+TEST(elixir_channels_pubsub_and_handle_in) {
+    CBMFileResult *r =
+        extract("defmodule Acme.Notifier do\n"
+                "  def announce(p) do\n"
+                "    Phoenix.PubSub.broadcast(Acme.PubSub, \"user:created\", p)\n"
+                "  end\n"
+                "  def watch, do: Phoenix.PubSub.subscribe(Acme.PubSub, \"user:updated\")\n"
+                "end\n"
+                "defmodule AcmeWeb.RoomChannel do\n"
+                "  def handle_in(\"new_msg\", payload, socket) do\n"
+                "    push(socket, \"pong\", %{})\n"
+                "    {:noreply, socket}\n"
+                "  end\n"
+                "  def handle_in(\"ping\", _p, socket) when is_map(socket) do\n"
+                "    {:noreply, socket}\n"
+                "  end\n"
+                "end\n",
+                CBM_LANG_ELIXIR, "t", "chan.ex");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT(has_channel(r, "user:created", "phoenix_pubsub", CBM_CHANNEL_EMIT));
+    ASSERT(has_channel(r, "user:updated", "phoenix_pubsub", CBM_CHANNEL_LISTEN));
+    /* handle_in clauses are listeners — including the guarded one. */
+    ASSERT(has_channel(r, "new_msg", "phoenix_channel", CBM_CHANNEL_LISTEN));
+    ASSERT(has_channel(r, "ping", "phoenix_channel", CBM_CHANNEL_LISTEN));
+    /* A bare `push`/`broadcast` inside the channel module is an emit. */
+    ASSERT(has_channel(r, "pong", "phoenix_channel", CBM_CHANNEL_EMIT));
+    cbm_free_result(r);
+    PASS();
+}
+
+/* A Phoenix router registers with BARE macros, so the callee is exactly `get`,
+ * which no dotted suffix (".get", "::get") matches — every Phoenix app minted
+ * zero Routes. The path argument only reaches the resolver because the Elixir
+ * arguments node is found by fallback, so this also pins first_string_arg. */
+TEST(elixir_router_macro_args) {
+    CBMFileResult *r = extract("defmodule AcmeWeb.Router do\n"
+                               "  get \"/wallets\", WalletController, :index\n"
+                               "  post \"/transactions\", TransactionController, :create\n"
+                               "end\n",
+                               CBM_LANG_ELIXIR, "t", "router.ex");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT(has_call(r, "get"));
+    ASSERT(has_call(r, "post"));
+    for (int i = 0; i < r->calls.count; i++) {
+        if (strcmp(r->calls.items[i].callee_name, "get") == 0) {
+            ASSERT_NOT_NULL(r->calls.items[i].first_string_arg);
+            ASSERT_STR_EQ("/wallets", r->calls.items[i].first_string_arg);
+            /* The handler is an `alias` node — the kind list used to skip it,
+             * so no route ever got a HANDLES edge. */
+            ASSERT_STR_EQ("WalletController", r->calls.items[i].second_arg_name);
+        }
+    }
+    cbm_free_result(r);
+    PASS();
+}
+
+/* Elixir control flow is `call` nodes and `stab_clause` arms, not branch node
+ * TYPES, so the generic complexity walk scored every Elixir function 0 and the
+ * fingerprint was never computed at all (no similarity/duplicate detection).
+ * Clause counts add up because all clauses collapse into one Function. */
+TEST(elixir_complexity_and_fingerprint) {
+    CBMFileResult *r = extract("defmodule Cx do\n"
+                               "  def classify(x) when is_integer(x) do\n"
+                               "    case x do\n"
+                               "      0 -> :zero\n"
+                               "      n when n > 0 -> :pos\n"
+                               "      _ -> :neg\n"
+                               "    end\n"
+                               "  end\n"
+                               "  def classify(x, y) do\n"
+                               "    if x && y, do: :both, else: :one\n"
+                               "  end\n"
+                               "  def plain(a), do: a\n"
+                               "end\n",
+                               CBM_LANG_ELIXIR, "t", "cx.ex");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    CBMDefinition *cls = find_def_qn(r, "t.cx.Cx.classify");
+    ASSERT_NOT_NULL(cls);
+    /* Clause 1: `when` guard + 3 case arms + the arm's own `when` = 5.
+     * Clause 2: `if` + `&&` = 2.  Summed across clauses = 7. */
+    ASSERT_EQ(7, cls->complexity);
+    ASSERT(cls->cognitive > 0);
+    ASSERT(cls->lines > 0);
+    /* A straight-line body has no decisions but still gets a line count. */
+    CBMDefinition *plain = find_def_qn(r, "t.cx.Cx.plain");
+    ASSERT_NOT_NULL(plain);
+    ASSERT_EQ(0, plain->complexity);
+    ASSERT(plain->lines > 0);
+    cbm_free_result(r);
+    PASS();
+}
+
+/* --- HEEx (Phoenix templates) --- */
+
+/* A template defines nothing; its graph value is the Elixir function components
+ * it renders. `.heex` files were not indexed at all before, so the whole
+ * LiveView template layer was invisible. The leading dot on `<.button>` means
+ * "imported into this template's module" and is stripped so the registry can
+ * resolve the bare name; a dotted component keeps its full path. */
+TEST(heex_component_calls) {
+    CBMFileResult *r = extract("<div class=\"p-4\">\n"
+                               "  <.button phx-click=\"save\">Save</.button>\n"
+                               "  <MyAppWeb.CoreComponents.table rows={@rows} />\n"
+                               "  <p>plain text, no component</p>\n"
+                               "</div>\n",
+                               CBM_LANG_HEEX, "t", "index.html.heex");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT(has_call(r, "button"));
+    ASSERT(has_call(r, "MyAppWeb.CoreComponents.table"));
+    /* Plain HTML tags are not components and must not become callees. Asserted
+     * on the exact count because has_call() is a substring match — "p" occurs
+     * inside "MyAppWeb". */
+    ASSERT_EQ(2, r->calls.count);
     cbm_free_result(r);
     PASS();
 }
@@ -5568,6 +5706,10 @@ SUITE(extraction) {
     RUN_TEST(elixir_defimpl_variants);
     RUN_TEST(elixir_operator_def);
     RUN_TEST(elixir_attr_calls_and_usage);
+    RUN_TEST(elixir_channels_pubsub_and_handle_in);
+    RUN_TEST(elixir_router_macro_args);
+    RUN_TEST(elixir_complexity_and_fingerprint);
+    RUN_TEST(heex_component_calls);
     RUN_TEST(haskell_function);
     RUN_TEST(ocaml_function);
     RUN_TEST(erlang_function);

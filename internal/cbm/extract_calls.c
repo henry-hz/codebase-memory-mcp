@@ -507,6 +507,30 @@ static char *extract_objc_callee(CBMArena *a, TSNode node, const char *source, c
     return ts_node_is_null(selector) ? NULL : cbm_node_text(a, selector, source);
 }
 
+/* HEEx: a template's only graph-relevant content is the Elixir function
+ * components it renders. `<.button>` is a `component_name` whose text is
+ * ".button" — the leading dot means "a function imported into this template's
+ * module", so it is stripped and the bare name left for the registry to resolve
+ * (typically to MyAppWeb.CoreComponents.button). `<MyApp.Components.table>`
+ * keeps its dotted form and resolves via qualified_suffix. */
+static char *extract_heex_callee(CBMArena *a, TSNode node, const char *source, const char *nk) {
+    if (strcmp(nk, "component_name") != 0) {
+        return NULL;
+    }
+    /* `<.button>…</.button>` carries a component_name on BOTH tags. Counting the
+     * closing one would double every paired component in the call graph, so only
+     * the opening / self-closing tag is emitted. */
+    TSNode parent = ts_node_parent(node);
+    if (!ts_node_is_null(parent) && strcmp(ts_node_type(parent), "end_component") == 0) {
+        return NULL;
+    }
+    char *name = cbm_node_text(a, node, source);
+    if (!name || !name[0]) {
+        return NULL;
+    }
+    return name[0] == '.' ? name + 1 : name;
+}
+
 // Erlang: extract callee from call node's first child.
 static char *extract_erlang_callee(CBMArena *a, TSNode node, const char *source, const char *nk) {
     if (strcmp(nk, "call") != 0 || ts_node_child_count(node) == 0) {
@@ -1046,6 +1070,9 @@ static char *extract_callee_lang_specific(CBMArena *a, TSNode node, const char *
         }
     }
 
+    if (lang == CBM_LANG_HEEX) {
+        return extract_heex_callee(a, node, source, nk);
+    }
     if (lang == CBM_LANG_JSONNET) {
         char *c = extract_jsonnet_callee(a, node, source, nk);
         return c ? c : extract_scripting_callee(a, node, source, lang, nk);
@@ -1837,6 +1864,15 @@ static const char *extract_handler_arg(CBMExtractCtx *ctx, TSNode args) {
             arg2 = ts_node_named_child(arg2, 0);
         }
         const char *ak2 = ts_node_type(arg2);
+        /* Phoenix names its handler with a module reference:
+         * `get "/wallets", WalletController, :index`. That is an `alias` node
+         * (or a `dot` when written out in full), neither of which any of the
+         * kinds below matches, so every Phoenix route was minted without a
+         * HANDLES edge. */
+        if (ctx->language == CBM_LANG_ELIXIR &&
+            (strcmp(ak2, "alias") == 0 || strcmp(ak2, "dot") == 0)) {
+            return cbm_node_text(ctx->arena, arg2, ctx->source);
+        }
         /* `name` = PHP bare identifier handler; string = Laravel string handler
          * ('showUsers' or 'Controller@method'). */
         if (strcmp(ak2, "identifier") == 0 || strcmp(ak2, "member_expression") == 0 ||
@@ -2284,6 +2320,20 @@ void handle_calls(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec *spec, Walk
             }
 
             TSNode args = ts_node_child_by_field_name(node, TS_FIELD("arguments"));
+            /* tree-sitter-elixir attaches NO field name to a call's arguments
+             * node (its whole field set is key, left, operand, operator,
+             * quoted_start, quoted_end, right, target, value), so the lookup above is always null
+             * for Elixir and first_string_arg was never populated for ANY
+             * Elixir call. That silently disabled every downstream signal that
+             * keys off a call's string argument: Phoenix routes, HTTP/async
+             * service URLs, and config keys. cbm_elixir_call_args is the shared
+             * second-child fallback the def side already uses. Restricted to
+             * `call` nodes — Elixir's other call kinds (`dot`, the `|>`
+             * binary_operator) have no arguments node in that position. */
+            if (ts_node_is_null(args) && ctx->language == CBM_LANG_ELIXIR &&
+                strcmp(ts_node_type(node), "call") == 0) {
+                args = cbm_elixir_call_args(node);
+            }
             // ObjectScript stores args under oref_method/method_args, not the
             // generic "arguments" field.
             if (ts_node_is_null(args) && (ctx->language == CBM_LANG_OBJECTSCRIPT_UDL ||

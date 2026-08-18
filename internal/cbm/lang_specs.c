@@ -22,6 +22,7 @@ extern const TSLanguage *tree_sitter_c(void);
 extern const TSLanguage *tree_sitter_bash(void);
 extern const TSLanguage *tree_sitter_zig(void);
 extern const TSLanguage *tree_sitter_elixir(void);
+extern const TSLanguage *tree_sitter_heex(void);
 extern const TSLanguage *tree_sitter_haskell(void);
 extern const TSLanguage *tree_sitter_ocaml(void);
 extern const TSLanguage *tree_sitter_objc(void);
@@ -511,6 +512,14 @@ static const char *elixir_call_types[] = {"call", "dot", "binary_operator", NULL
 static const char *elixir_import_types[] = {"call", NULL};
 static const char *elixir_branch_types[] = {"call", NULL};
 static const char *elixir_var_types[] = {"binary_operator", NULL};
+
+// ==================== HEEX (Phoenix templates) ====================
+/* A HEEx template defines nothing — it REFERENCES Elixir function components
+ * (`<.button>`, `<MyAppWeb.CoreComponents.table>`) and slots. Only the call
+ * side carries graph value, so every other table stays empty; `component_name`
+ * is the node the callee extractor reads. */
+static const char *heex_call_types[] = {"component_name", NULL};
+static const char *heex_module_types[] = {"fragment", NULL};
 
 // ==================== HASKELL ====================
 /* "bind" = a nullary value binding (`foo = 1`); has a `name` field like `function`.
@@ -1752,6 +1761,12 @@ static const CBMLangSpec lang_specs[CBM_LANG_COUNT] = {
                          elixir_module_types, elixir_call_types, elixir_import_types, empty_types,
                          elixir_branch_types, elixir_var_types, elixir_var_types, empty_types, NULL,
                          empty_types, elixir_env_funcs, NULL, tree_sitter_elixir, NULL},
+
+    // CBM_LANG_HEEX
+    [CBM_LANG_HEEX] = {CBM_LANG_HEEX, empty_types, empty_types, empty_types, heex_module_types,
+                       heex_call_types, empty_types, empty_types, empty_types, empty_types,
+                       empty_types, empty_types, NULL, empty_types, NULL, NULL, tree_sitter_heex,
+                       NULL},
 
     // CBM_LANG_HASKELL
     [CBM_LANG_HASKELL] = {CBM_LANG_HASKELL, haskell_func_types, haskell_class_types, empty_types,
