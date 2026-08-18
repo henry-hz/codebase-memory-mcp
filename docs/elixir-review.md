@@ -1,6 +1,6 @@
 # Review request: Elixir extraction overhaul in codebase-memory-mcp
 
-You are reviewing an uncommitted change in `/Users/henry/codebase-memory-mcp` (branch `main`, base
+You are reviewing an uncommitted change in the repository root (branch `main`, base
 commit `940f484f`). Nothing is committed; the change is entirely in the working tree. Run
 `git diff` to see it. **I am the author of this change and I want you to try to break it**, not to
 confirm it.
@@ -279,8 +279,8 @@ that would have caught them did not run. If you can run ASan somewhere, do.
 
 ```bash
 # Production binary - `cc` is Nix gcc-15 and cannot find zlib.h without these:
-export CPATH=/nix/store/00xgrzf29vdnr4yf63pfvklj4bhmbzd5-zlib-1.3.1-dev/include
-export LIBRARY_PATH=/nix/store/l6rgahdkcyid3m6hq6hwxmz225gbxb51-zlib-1.3.1/lib
+export CPATH=<zlib-dev>/include        # e.g. a Nix zlib-1.3.1-dev store path
+export LIBRARY_PATH=<zlib>/lib         # matching runtime zlib
 make -j8 -f Makefile.cbm cbm
 
 # Test binary - must use Apple clang and must drop ASan (see §6).
@@ -306,7 +306,7 @@ clang-format --dry-run --Werror <changed src files>
 ```
 
 There is a throwaway Elixir AST dumper at
-`/private/tmp/claude-501/-Users-henry-codebase-memory-mcp/12ca48ce-e2cd-4769-98a5-eb63923fe19b/scratchpad/astdump.c`
+`<scratch>/astdump.c`
 (build: `cc -std=c11 -O1 -Iinternal/cbm -Iinternal/cbm/vendored/ts_runtime/include -o astdump
 astdump.c build/c/prod_grammar_elixir.o build/c/prod_ts_runtime.o`) - useful for checking grammar
 shapes rather than guessing them.

@@ -86,3 +86,6 @@ soak-results-query-leak/
 # Scorecard as a binary artifact in source). Source only, never the build.
 /pkg/go/codebase-memory-mcp
 /pkg/go/codebase-memory-mcp.exe
+
+# Personal Claude Code permissions — never shared
+.claude/settings.local.json
