@@ -1511,22 +1511,32 @@ TEST(elixir_complexity_and_fingerprint) {
                                "    if x && y, do: :both, else: :one\n"
                                "  end\n"
                                "  def plain(a), do: a\n"
+                               "  def overlay_for(\"upload\"), do: :upload\n"
+                               "  def overlay_for(\"note\"), do: :note\n"
+                               "  def overlay_for(_), do: nil\n"
                                "end\n",
                                CBM_LANG_ELIXIR, "t", "cx.ex");
     ASSERT_NOT_NULL(r);
     ASSERT_FALSE(r->has_error);
     CBMDefinition *cls = find_def_qn(r, "t.cx.Cx.classify");
     ASSERT_NOT_NULL(cls);
-    /* Clause 1: `when` guard + 3 case arms + the arm's own `when` = 5.
-     * Clause 2: `if` + `&&` = 2.  Summed across clauses = 7. */
-    ASSERT_EQ(7, cls->complexity);
+    /* Clause 1: `when` guard + the `case` itself + 3 case arms + the arm's own
+     * `when` = 6.  Clause 2: `if` + `&&` = 2, plus 1 for being an additional
+     * clause of the same function.  Summed = 9. */
+    ASSERT_EQ(9, cls->complexity);
     ASSERT(cls->cognitive > 0);
     ASSERT(cls->lines > 0);
-    /* A straight-line body has no decisions but still gets a line count. */
+    /* A straight-line SINGLE-clause body has no decisions but still gets a
+     * line count — a new language must not make every function nonzero. */
     CBMDefinition *plain = find_def_qn(r, "t.cx.Cx.plain");
     ASSERT_NOT_NULL(plain);
     ASSERT_EQ(0, plain->complexity);
     ASSERT(plain->lines > 0);
+    /* Pattern-dispatch across clauses is Elixir's switch: three branch-free
+     * clauses are three alternatives, not zero decisions. */
+    CBMDefinition *disp = find_def_qn(r, "t.cx.Cx.overlay_for");
+    ASSERT_NOT_NULL(disp);
+    ASSERT_EQ(2, disp->complexity);
     cbm_free_result(r);
     PASS();
 }

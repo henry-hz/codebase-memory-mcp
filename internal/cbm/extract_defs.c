@@ -5183,14 +5183,19 @@ static bool elixir_node_text_is(TSNode n, const char *source, const char *lit) {
  * cbm_compute_complexity matches on node type, so the generic path is unusable
  * and Elixir functions were shipping complexity 0.
  *
- * Counted here, chosen so nothing is scored twice:
- *   - every `stab_clause`         — one per case/cond/fn/rescue/catch/else arm
- *   - `if` / `unless` / `with` / `for` calls, which have no arms of their own
+ * Counted here:
+ *   - the branching construct itself — `if`, `unless`, `with`, `for`, `case`,
+ *     `cond`, `try`, `receive`
+ *   - every `stab_clause`  — one per case/cond/fn/rescue/catch/else arm
  *   - `&&` / `||` / `and` / `or`  — short-circuit operators
- *   - `when`                      — a guard is a decision
- * `case`/`cond`/`fn`/`try`/`receive` are deliberately NOT counted: their arms
- * already are. Cognitive weighting is Campbell's, identical to the generic
- * walk (+1 plus the current nesting depth). */
+ *   - `when`               — a guard is a decision
+ * Container AND arm are both counted, which is the convention the generic
+ * tables already use for every other language: Go counts
+ * `expression_switch_statement` plus each `expression_case`, Python counts
+ * `try_statement` plus each `except_clause`. The caller adds one more per
+ * ADDITIONAL function clause — see extract_elixir_func_def. Cognitive
+ * weighting is Campbell's, identical to the generic walk (+1 plus the current
+ * nesting depth). */
 static bool elixir_is_branch_call(TSNode call, const char *source) {
     if (ts_node_child_count(call) == 0) {
         return false;
@@ -5202,7 +5207,11 @@ static bool elixir_is_branch_call(TSNode call, const char *source) {
     return elixir_node_text_is(callee, source, "if") ||
            elixir_node_text_is(callee, source, "unless") ||
            elixir_node_text_is(callee, source, "with") ||
-           elixir_node_text_is(callee, source, "for");
+           elixir_node_text_is(callee, source, "for") ||
+           elixir_node_text_is(callee, source, "case") ||
+           elixir_node_text_is(callee, source, "cond") ||
+           elixir_node_text_is(callee, source, "try") ||
+           elixir_node_text_is(callee, source, "receive");
 }
 
 /* A comprehension (`for x <- xs, do: ...`) is Elixir's only real loop node.
@@ -5348,9 +5357,18 @@ static void extract_elixir_func_def(CBMExtractCtx *ctx, TSNode node, const char 
             prev->arities = elixir_merge_arities(a, prev->arities, arity);
             /* One Function, many clauses: a clause's decisions belong to the
              * whole function, so counts add and the depth maxima take the
-             * deepest clause. */
-            prev->complexity += cx.cyclomatic;
-            prev->cognitive += cx.cognitive;
+             * deepest clause.
+             *
+             * The extra +1 is the clause head itself. Multi-clause pattern
+             * dispatch IS Elixir's switch — `defp performer(%{name: nil}), do:
+             * ...` four times over is the same decision structure a `case` with
+             * four arms expresses, and that scores 4 through stab_clause. Only
+             * ADDITIONAL clauses count, so a single-clause function with a
+             * straight-line body still scores 0 exactly like every other
+             * language's branch-free function. Without this the two spellings
+             * of the same logic differed by the whole of their complexity. */
+            prev->complexity += cx.cyclomatic + 1;
+            prev->cognitive += cx.cognitive + 1;
             prev->loop_count += cx.loop_count;
             if (cx.loop_depth > prev->loop_depth) {
                 prev->loop_depth = cx.loop_depth;

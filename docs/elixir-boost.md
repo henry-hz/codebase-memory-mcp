@@ -601,8 +601,34 @@ Fresh index of a real 829-file Phoenix application:
 | `.heex` files indexed | 0 | 7 |
 | component CALLS from templates | 0 | 20 |
 
-Spot-checked by hand: `Bank.Clients.apply_client_filters` scores 33, which is exactly its 14
-`stab_clause` arms + 6 `when` guards + 6 `and` + 1 `if` + 5 `or` + 1 `and`.
+#### Multi-clause dispatch (added after the first measurement)
+
+The first cut counted `stab_clause` arms, `if`/`unless`/`with`/`for`, short-circuit operators and
+`when` guards — but not multi-clause pattern dispatch, which is Elixir's *primary* branching
+construct. `defp performer(%{name: nil, role: nil}), do: …` written four times scored **0**, while
+the identical decision structure written as a `case` with four arms scored 4. Two corrections:
+
+- Each ADDITIONAL clause of a function counts 1. Only additional ones, so a single-clause
+  straight-line function still scores 0, exactly like every other language's branch-free function.
+- The branching construct itself is counted alongside its arms (`case`, `cond`, `try`, `receive`
+  joined `if`/`unless`/`with`/`for`). That is the convention the generic tables already use: Go
+  counts `expression_switch_statement` *plus* each `expression_case`, Python counts
+  `try_statement` *plus* each `except_clause`.
+
+Measured effect on functions carrying a nonzero complexity:
+
+| corpus | before | after |
+|---|---|---|
+| `elixir-lang/elixir` (6,346 `.ex` functions) | 4,002 (63%) | **4,753 (75%)** |
+| the Phoenix app above (4,118 `.ex` functions) | 2,023 (49%) | **2,500 (61%)** |
+
+For scale, the TypeScript and Python sources in the same Phoenix repo score 20 of 386 (5%), so
+Elixir is now the best-covered language in that tree rather than the worst.
+
+Spot-checked by hand: `Bank.Clients.apply_client_filters` scores 34 — its 14 `stab_clause` arms +
+6 `when` guards + 6 `and` + 1 `if` + 5 `or` + 1 `and` + the inner `case` container.
+`overlay_for/1` (3 branch-free clauses) scores 2, `performer/1` (4 clauses) scores 3, and
+`detail_rows/1` (one clause, straight-line) stays 0.
 
 Channels are green on a synthetic fixture (`Phoenix.PubSub.broadcast`/`subscribe`, `handle_in/3`
 including a guarded clause, bare `push`/`broadcast`). The Phoenix app above still reports zero
