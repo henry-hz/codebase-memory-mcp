@@ -729,7 +729,7 @@ PP_OBJ_TSAN = $(BUILD_DIR)/tsan_preprocessor.o
 
 # ── Targets ──────────────────────────────────────────────────────
 
-.PHONY: test test-par test-repro test-foundation test-tsan test-daemon-smoke cbm cbm-with-ui frontend embed clean-c lint lint-tidy lint-tidy-diff lint-cppcheck lint-format security
+.PHONY: test test-par test-repro test-foundation test-tsan test-daemon-smoke cbm cbm-with-ui install-local frontend embed clean-c lint lint-tidy lint-tidy-diff lint-cppcheck lint-format security
 
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
@@ -1048,6 +1048,24 @@ $(BUILD_DIR)/codebase-memory-mcp: $(MAIN_SRC) $(PROD_SRCS) $(EXTRACTION_SRCS) $(
 
 cbm: $(BUILD_DIR)/codebase-memory-mcp
 	@echo "Built: $(BUILD_DIR)/codebase-memory-mcp"
+
+# ── Install the local build over the one your editor launches ────
+#
+# `cbm` produces $(BUILD_DIR)/codebase-memory-mcp, but the MCP server an editor
+# starts is a different file (usually ~/.local/bin/codebase-memory-mcp). Until
+# that one is replaced, local extraction changes are invisible through the MCP
+# tools — easy to lose hours reading graph output from a stale binary.
+#
+#   make -f Makefile.cbm install-local                  # build, back up, install
+#   make -f Makefile.cbm install-local ARGS=--dry-run   # show what would happen
+#   make -f Makefile.cbm install-local ARGS="--dir ~/bin"
+#
+# The script delegates the replacement to the product's own transactional
+# `install` subcommand and keeps a timestamped backup. It builds by itself, so
+# this target does not depend on `cbm` — that would build twice.
+ARGS ?=
+install-local:
+	cd $(CURDIR) && scripts/install-local.sh $(ARGS)
 
 # ── Build with embedded UI (requires Node.js) ───────────────────
 
